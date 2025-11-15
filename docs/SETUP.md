@@ -1,5 +1,15 @@
 # Multi-Device Temperature Sensor Setup
 
+## 📚 Based On
+
+This project's hardware setup and DS18B20 implementation is based on the comprehensive tutorial by Random Nerd Tutorials:
+
+**[ESP32 DS18B20 Temperature Arduino IDE](https://randomnerdtutorials.com/esp32-ds18b20-temperature-arduino-ide/)** by Rui Santos
+
+For detailed wiring diagrams and sensor specifications, please refer to the original tutorial.
+
+---
+
 ## ✅ Setup Complete!
 
 Your temperature sensor system is now configured for **multiple devices with location names**.

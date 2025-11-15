@@ -313,9 +313,23 @@ Feel free to fork and submit PRs for:
 
 ---
 
+## 📚 Credits & References
+
+This project is based on the excellent ESP32 DS18B20 temperature sensor tutorial by Random Nerd Tutorials:
+
+- **Tutorial**: [ESP32 DS18B20 Temperature Arduino IDE](https://randomnerdtutorials.com/esp32-ds18b20-temperature-arduino-ide/)
+- **Author**: Rui Santos
+- **Platform**: Random Nerd Tutorials
+
+The original tutorial provides the foundation for the DS18B20 sensor integration and basic ESP32/ESP8266 setup used in this project. This project extends the original work to support multiple boards, cloud logging to AWS Lambda and InfluxDB Cloud, and production-grade reliability features like exponential backoff and health monitoring.
+
+---
+
 **Happy Monitoring!** 🎉
 
 If you have questions or issues, check the serial monitor output first:
 ```bash
 platformio device monitor -p /dev/ttyUSB0 -b 115200
 ```
+
+````
