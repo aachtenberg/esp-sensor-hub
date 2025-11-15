@@ -7,9 +7,12 @@
  * Update DEVICE_LOCATION and DEVICE_BOARD for each device before flashing
  */
 
+// Data wire is connected to GPIO 4 on ESP8266/ESP32
+static const int ONE_WIRE_PIN = 4;
+
 // Device location name (appears in InfluxDB, Lambda logs, and Home Assistant)
 // Examples: "Big Garage", "Bedroom", "Living Room", "Basement", "Attic", etc.
-static const char* DEVICE_LOCATION = "Pump House";
+static const char* DEVICE_LOCATION = "Big Garage";
 
 // Optional: Device ID (useful for Home Assistant entity identification)
 // If empty, will use chip ID (MAC address)

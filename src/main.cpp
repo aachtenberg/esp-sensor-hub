@@ -25,10 +25,7 @@
 #include "device_config.h"
 
 // Data wire is connected to GPIO 4
-#define ONE_WIRE_BUS 4
-
-// Setup a oneWire instance to communicate with any OneWire devices
-OneWire oneWire(ONE_WIRE_BUS);
+OneWire oneWire(ONE_WIRE_PIN);
 
 // Pass our oneWire reference to Dallas Temperature sensor 
 DallasTemperature sensors(&oneWire);
@@ -73,6 +70,11 @@ String readDSTemperatureF() {
   return String(tempF);
 }
 
+// Validate that temperature reading is valid
+bool isValidTemperature(const String& temp) {
+  return temp.length() > 0 && temp != "--";
+}
+
 // Simple logging function - just output to serial
 void logMessage(String msg) {
   Serial.println(msg);
@@ -100,15 +102,16 @@ void updateTemperatures() {
 }
 
 void sendToInfluxDB() {
-  if (WiFi.status() == WL_CONNECTED && temperatureC != "--") {
+  if (WiFi.status() == WL_CONNECTED && isValidTemperature(temperatureC)) {
     WiFiClientSecure client;
     // Disable SSL certificate verification (safe for trusted networks)
     client.setInsecure();
     
     HTTPClient http;
+    http.setTimeout(10000);  // 10 second timeout
     String url = String(INFLUXDB_URL) + "/api/v2/write?bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
     
-    logMessage("InfluxDB URL: " + url);
+    Serial.println("InfluxDB URL: " + url);
     
     http.begin(client, url);
     http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
@@ -123,28 +126,33 @@ void sendToInfluxDB() {
     
     if (httpCode > 0) {
       if (httpCode == 204) {
-        logMessage("InfluxDB: 204 OK");
+        Serial.println("InfluxDB: 204 OK");
       } else {
         String response = http.getString();
-        logMessage("InfluxDB Code " + String(httpCode));
+        Serial.println("InfluxDB Code " + String(httpCode));
       }
     } else {
-      logMessage("InfluxDB POST failed");
+      Serial.println("InfluxDB POST failed: " + String(http.errorToString(httpCode)));
     }
     http.end();
   } else {
-    Serial.println("WiFi not connected or no valid temperature");
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi not connected, skipping InfluxDB");
+    } else {
+      Serial.println("Invalid temperature, skipping InfluxDB");
+    }
   }
 }
 
 void sendToLambda() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected, cannot send logs to Lambda");
+    Serial.println("WiFi not connected, skipping Lambda");
     return;
   }
 
-  // Don't send if we have no temperature data
-  if (temperatureC == "--") {
+  // Don't send if we have no valid temperature data
+  if (!isValidTemperature(temperatureC)) {
+    Serial.println("Invalid temperature, skipping Lambda");
     return;
   }
 
@@ -152,6 +160,7 @@ void sendToLambda() {
   client.setInsecure();  // Disable SSL verification for ESP8266
   
   HTTPClient http;
+  http.setTimeout(10000);  // 10 second timeout
   
   Serial.println("Sending temperature to Lambda endpoint...");
   
@@ -176,13 +185,13 @@ void sendToLambda() {
     if (httpCode == 200 || httpCode == 204) {
       String response = http.getString();
       Serial.println("Lambda response: " + response);
-      Serial.println("Data sent to Lambda successfully!");
+      Serial.println("✅ Data sent to Lambda successfully!");
     } else {
       String response = http.getString();
-      Serial.println("Lambda Response " + String(httpCode) + ": " + response);
+      Serial.println("❌ Lambda Error " + String(httpCode) + ": " + response);
     }
   } else {
-    Serial.println("Lambda POST error: " + String(http.errorToString(httpCode)));
+    Serial.println("❌ Lambda POST error: " + String(http.errorToString(httpCode)));
   }
   
   http.end();
@@ -291,15 +300,27 @@ void setup(){
     WiFi.config(local_IP, gateway, subnet, dns);
   }
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.println("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.println("Connecting to WiFi: " + String(WIFI_SSID));
+  
+  int wifiAttempts = 0;
+  const int MAX_WIFI_ATTEMPTS = 20;  // ~10 seconds at 500ms intervals
+  
+  while (WiFi.status() != WL_CONNECTED && wifiAttempts < MAX_WIFI_ATTEMPTS) {
     delay(500);
     Serial.print(".");
+    wifiAttempts++;
   }
+  
   Serial.println();
   
-  // Print ESP Local IP Address
-  Serial.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("✅ WiFi connected!");
+    Serial.println("IP: " + WiFi.localIP().toString());
+    Serial.println("Signal strength: " + String(WiFi.RSSI()) + " dBm");
+  } else {
+    Serial.println("❌ WiFi connection timeout after " + String(MAX_WIFI_ATTEMPTS * 500) + "ms");
+    Serial.println("Continuing with offline mode - will retry in main loop");
+  }
 
   // Connect to MQTT broker (disabled to save RAM on ESP8266)
   // mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
