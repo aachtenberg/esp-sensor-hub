@@ -1,0 +1,20 @@
+# PlatformIO
+.pio
+.vscode
+
+# Secrets
+include/secrets.h
+
+# Python
+.venv
+*.pyc
+__pycache__
+
+# Other
+*.log
+*.bak
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
