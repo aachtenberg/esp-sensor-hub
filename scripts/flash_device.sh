@@ -3,7 +3,7 @@
 # Usage: ./flash_device.sh "Device Location" [board_type]
 # board_type: esp8266 or esp32 (default: esp32)
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCATION="${1:-}"
 BOARD="${2:-esp32}"
 

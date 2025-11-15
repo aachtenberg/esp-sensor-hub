@@ -9,6 +9,9 @@ include/secrets.h
 .venv
 *.pyc
 __pycache__
+*.egg-info/
+dist/
+build/
 
 # Other
 *.log
@@ -18,3 +21,7 @@ __pycache__
 *~
 .DS_Store
 Thumbs.db
+
+# AWS CDK
+scripts/cdk.out/
+scripts/cdk/cdk.context.json
