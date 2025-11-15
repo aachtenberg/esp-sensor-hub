@@ -61,7 +61,7 @@ Repeat the same process:
 
 ## Locations to Use
 
-Suggestions for your Home Assistant setup:
+Choose location names for your devices:
 - Big Garage ✅ (already set)
 - Bedroom
 - Living Room
@@ -70,6 +70,8 @@ Suggestions for your Home Assistant setup:
 - Attic
 - Office
 - Front Porch
+
+**Note:** Home Assistant integration requires separate setup to read from InfluxDB.
 
 ---
 
@@ -124,21 +126,14 @@ http://192.168.0.XXX/
 
 ---
 
-## Home Assistant Integration
+## Home Assistant Integration (Optional)
 
-Once all devices are flashing:
+**Note:** This requires separate Home Assistant setup. The device sends data to InfluxDB, and HA can read from there.
 
-### Option 1: REST Sensors (Simple)
-```yaml
-sensor:
-  - platform: rest
-    resource: http://192.168.0.103/temperaturec
-    name: "Big Garage Temp"
-    unit_of_measurement: "°C"
-```
+### Recommended: InfluxDB Integration
+Configure Home Assistant to query InfluxDB for temperature data from your device locations.
 
-### Option 2: InfluxDB Query (Recommended)
-Use Home Assistant's InfluxDB integration to query your device locations.
+See SETUP.md for detailed Home Assistant configuration instructions.
 
 ---
 
@@ -154,36 +149,28 @@ Use Home Assistant's InfluxDB integration to query your device locations.
 - Verify pull-up resistor (4.7kΩ) on data line
 
 **Can't see device in Home Assistant?**
-- Wait 2-3 minutes after flashing
-- Check InfluxDB integration is configured
-- Verify device is sending data (serial monitor)
-- Restart Home Assistant
+- Wait 2-3 minutes after flashing for data to appear in InfluxDB
+- **Configure Home Assistant InfluxDB integration** (see SETUP.md)
+- Verify device is sending data (check serial monitor)
+- Restart Home Assistant after integration setup
 
 ---
 
-## Next: Home Assistant Dashboard
+## Next: Home Assistant Setup (Optional)
 
-After all devices are flashed, create a dashboard:
+After all devices are flashed and sending data to InfluxDB:
+
+1. Configure Home Assistant InfluxDB integration (see SETUP.md)
+2. Create sensors for each device location
+3. Add temperature entities to your dashboard
+4. Set up automations and alerts as needed
 
 ```yaml
-# configuration.yaml
+# Example configuration after HA-InfluxDB setup
 homeassistant:
   customize:
     sensor.big_garage_temperature:
       friendly_name: Big Garage
       icon: mdi:thermometer
-    sensor.bedroom_temperature:
-      friendly_name: Bedroom
-      icon: mdi:thermometer
-```
-
-Then add to your UI dashboard:
-```yaml
-cards:
-  - type: entities
-    entities:
-      - sensor.big_garage_temperature
-      - sensor.bedroom_temperature
-      - sensor.living_room_temperature
 ```
 

@@ -2,7 +2,9 @@
 
 ## Setup Overview
 
-You have 3 ESP8266 devices that need to be flashed with different location names. Each device will send temperature data labeled with its location to Home Assistant, InfluxDB, and AWS.
+You have 3 ESP8266 devices that need to be flashed with different location names. Each device will send temperature data labeled with its location to InfluxDB Cloud and AWS Lambda.
+
+**Note:** Home Assistant integration requires separate setup to read temperature data from InfluxDB.
 
 ## Locations
 
@@ -96,24 +98,15 @@ After flashing each device:
    - Go to InfluxDB Cloud dashboard
    - Query: `SELECT * FROM temperature WHERE device="Big Garage"`
 
-4. **Check Home Assistant:**
-   - Your entity will appear in Home Assistant
-   - Use as sensor in automations/dashboards
+4. **Check Home Assistant (after setup):**
+   - Configure HA to read from InfluxDB (see SETUP.md)
+   - Your entity will appear in Home Assistant after integration setup
 
-## Home Assistant Integration
+## Home Assistant Integration (Optional)
 
-Once devices are flashing and sending data to InfluxDB:
+**Note:** This is a separate setup from device flashing. Devices send data to InfluxDB, and HA reads from there.
 
-### Option A: REST sensor
-```yaml
-sensor:
-  - platform: rest
-    resource: http://192.168.0.103/temperaturec
-    name: "Big Garage Temperature"
-    unit_of_measurement: "°C"
-```
-
-### Option B: InfluxDB integration (Recommended)
+### Recommended: InfluxDB Integration
 ```yaml
 influxdb:
   host: us-east-1-1.aws.cloud2.influxdata.com
@@ -125,16 +118,7 @@ influxdb:
   bucket: "sensor_data"
 ```
 
-Then query with template sensors:
-```yaml
-template:
-  - sensor:
-      - name: "Big Garage Temperature"
-        unique_id: garage_temp
-        unit_of_measurement: "°C"
-        state: |
-          {{ state_attr('sensor.garage_temperature', 'tempC') }}
-```
+Then create template sensors to query InfluxDB data. See SETUP.md for detailed configuration.
 
 ## Device Details
 
@@ -152,9 +136,10 @@ Each device sends:
 
 ### Device not appearing in Home Assistant
 - Verify device uploaded successfully (check serial output)
+- Check data is arriving in InfluxDB
+- **Configure Home Assistant InfluxDB integration** (see SETUP.md)
 - Check Home Assistant logs: `Developer Tools > Logs`
-- Verify InfluxDB integration is configured correctly
-- Wait 1-2 minutes for first data point
+- Wait 1-2 minutes after integration setup for first data point
 
 ### Temperature readings not updating
 - Check device serial monitor: `platformio device monitor -p /dev/ttyUSB0 -b 115200`
@@ -170,8 +155,9 @@ Each device sends:
 ## Next Steps
 
 1. ✅ Flash all 3 devices with different locations
-2. ✅ Verify in Home Assistant they appear with correct location names
-3. ✅ Create Home Assistant dashboard showing all 3 locations
-4. ✅ Set up automations (alerts if temperature too high, etc.)
-5. ✅ Deploy Grafana to visualize temperature trends over time
+2. ✅ Verify data appears in InfluxDB and CloudWatch
+3. ⏳ Set up Home Assistant integration (optional - see SETUP.md)
+4. ⏳ Create Home Assistant dashboard (requires HA-InfluxDB setup)
+5. ⏳ Set up automations (alerts if temperature too high, etc.)
+6. ⏳ Deploy Grafana to visualize temperature trends over time
 

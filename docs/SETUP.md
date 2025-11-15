@@ -1,4 +1,4 @@
-# Multi-Device Temperature Sensor - Home Assistant Integration
+# Multi-Device Temperature Sensor Setup
 
 ## ✅ Setup Complete!
 
@@ -7,7 +7,9 @@ Your temperature sensor system is now configured for **multiple devices with loc
 Each device will send data to:
 - ✅ **InfluxDB Cloud** - Long-term storage & Grafana
 - ✅ **AWS Lambda/CloudWatch** - Cloud logging
-- ✅ **Home Assistant** - Dashboard via REST/InfluxDB
+- ✅ **Local Web Server** - Direct device access
+
+**Note:** Home Assistant integration requires separate setup to read from InfluxDB.
 
 ---
 
@@ -55,7 +57,9 @@ Choose from these or add your own:
 
 ---
 
-## 🏠 Home Assistant Configuration
+## 🏠 Home Assistant Integration (Optional)
+
+**Note:** This is a separate setup from the device firmware. The ESP8266 sends data to InfluxDB, and Home Assistant can read from InfluxDB.
 
 ### 1. Add InfluxDB Integration
 
@@ -119,10 +123,12 @@ Result:
     │            │              │              │
     ▼            ▼              ▼              ▼
 ┌──────────────────────────────────────────────────────┐
-│             Home Assistant / Grafana                │
-│  Display all 3 devices with location names          │
+│             Grafana Dashboard                       │
+│  Historical graphs for all devices                  │
 └──────────────────────────────────────────────────────┘
 ```
+
+**Home Assistant Integration:** Configure HA to read from InfluxDB (separate setup required)
 
 ---
 
@@ -169,22 +175,26 @@ cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor
 ```
 
 ### Step 4: Done! 🎉
-Device will now appear in Home Assistant with location name "Bedroom"
+Device will now send data to InfluxDB and Lambda with location name "Bedroom"
+
+**For Home Assistant:** Configure HA to read from InfluxDB (see Home Assistant Integration section)
 
 ---
 
-## 📱 View in Home Assistant
+## 📱 View in Home Assistant (Optional)
+
+**Note:** Requires separate Home Assistant setup to read from InfluxDB.
 
 **Mobile App:**
 1. Open Home Assistant mobile app
 2. Go to Entities or Dashboard
 3. Filter by "temperature"
-4. See all 3 devices with location names
+4. See all devices with location names (after HA-InfluxDB setup)
 
 **Web Dashboard:**
 1. Home Assistant URL (usually `http://your-server:8123`)
 2. Create new dashboard
-3. Add all temperature sensors
+3. Add all temperature sensors (after HA-InfluxDB integration)
 4. Group by location
 
 ---
@@ -193,9 +203,10 @@ Device will now appear in Home Assistant with location name "Bedroom"
 
 ### Device not appearing in Home Assistant
 1. Check device uploaded (watch serial output)
-2. Wait 2-3 minutes for first data point
-3. Refresh Home Assistant
-4. Check InfluxDB integration is enabled
+2. Wait 2-3 minutes for first data point in InfluxDB
+3. **Configure Home Assistant InfluxDB integration** (see Home Assistant Integration section)
+4. Refresh Home Assistant
+5. Check InfluxDB integration is enabled
 
 ### Temperature shows as "unavailable"
 1. Verify InfluxDB token is correct
@@ -217,15 +228,16 @@ Device will now appear in Home Assistant with location name "Bedroom"
 ## 📈 Next Steps
 
 1. ✅ Flash all 3 devices with locations
-2. ✅ Verify in Home Assistant
-3. ⏳ Create Home Assistant dashboard
-4. ⏳ Set up temperature alerts/automations
-5. ⏳ Deploy Grafana for historical graphs
-6. ⏳ Add humidity/pressure sensors if desired
+2. ✅ Verify data in InfluxDB/CloudWatch
+3. ⏳ Set up Home Assistant integration (optional)
+4. ⏳ Create Home Assistant dashboard (requires HA setup)
+5. ⏳ Set up temperature alerts/automations in HA
+6. ⏳ Deploy Grafana for historical graphs
+7. ⏳ Add humidity/pressure sensors if desired
 
 ---
 
-## 💡 Example Automations in Home Assistant
+## 💡 Example Automations in Home Assistant (After Setup)
 
 ### Alert if temperature too high
 ```yaml
@@ -270,8 +282,9 @@ automation:
 - Check WiFi strength at device location
 
 **Data not appearing in Home Assistant?**
-- Check InfluxDB integration enabled
-- Verify token in `include/secrets.h`
+- Check device is sending to InfluxDB (watch serial monitor)
+- **Configure Home Assistant InfluxDB integration** (see Home Assistant Integration section)
+- Verify token in HA configuration
 - Query InfluxDB directly: https://us-east-1-1.aws.cloud2.influxdata.com/api/v1/query
 
 ---
