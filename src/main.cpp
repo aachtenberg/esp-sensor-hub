@@ -30,18 +30,27 @@ class NetworkBackoff {
 private:
     unsigned long lastFailure = 0;
     int consecutiveFailures = 0;
+    unsigned long minDelayMs;
+    unsigned long maxDelayMs;
+    int maxFailures;
     
 public:
+    // Constructor with customizable backoff parameters
+    NetworkBackoff(unsigned long minMs = MIN_BACKOFF_MS, 
+                   unsigned long maxMs = MAX_BACKOFF_MS,
+                   int maxFails = MAX_CONSECUTIVE_FAILURES)
+        : minDelayMs(minMs), maxDelayMs(maxMs), maxFailures(maxFails) {}
+    
     unsigned long getBackoffDelay() {
         if (consecutiveFailures == 0) return 0;
         
-        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 300s (capped)
-        unsigned long delay = min((unsigned long)pow(2, consecutiveFailures - 1) * 1000, MAX_BACKOFF_MS);
-        return max(delay, MIN_BACKOFF_MS);
+        // Exponential backoff: uses configured min/max
+        unsigned long delay = min((unsigned long)pow(2, consecutiveFailures - 1) * 1000, maxDelayMs);
+        return max(delay, minDelayMs);
     }
     
     void recordFailure() {
-        consecutiveFailures = min(consecutiveFailures + 1, MAX_CONSECUTIVE_FAILURES);
+        consecutiveFailures = min(consecutiveFailures + 1, maxFailures);
         lastFailure = millis();
     }
     
@@ -85,8 +94,7 @@ struct DeviceMetrics {
 };
 
 // Global instances
-NetworkBackoff lambdaBackoff;
-NetworkBackoff influxBackoff;
+NetworkBackoff lambdaBackoff(MIN_BACKOFF_MS, MAX_BACKOFF_MS, MAX_CONSECUTIVE_FAILURES);
 DeviceMetrics metrics;
 
 // Data wire is connected to GPIO 4
@@ -176,26 +184,33 @@ void sendToInfluxDB() {
     return;
   }
 
-  // Check if we should retry based on exponential backoff
-  if (!influxBackoff.shouldRetry()) {
-    Serial.println("InfluxDB backoff active, skipping send");
-    return;
-  }
-
   if (!isValidTemperature(temperatureC)) {
     Serial.println("Invalid temperature, skipping InfluxDB");
     return;
   }
 
-  WiFiClientSecure client;
-  // Disable SSL certificate verification (safe for trusted networks)
-  client.setInsecure();
-  
+  // Create appropriate client based on local vs cloud
+#if USE_LOCAL_INFLUXDB
+  // Local InfluxDB: Use unencrypted HTTP
+  WiFiClient client;
   HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);  // Use constant
-  String url = String(INFLUXDB_URL) + "/api/v2/write?bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
+#else
+  // Cloud InfluxDB: Use HTTPS with certificate verification disabled
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+#endif
   
-  Serial.println("InfluxDB URL: " + url);
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  
+  // Build URL based on local vs cloud
+#if USE_LOCAL_INFLUXDB
+  String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + String(INFLUXDB_ORG) + "&bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
+  Serial.println("InfluxDB (Local): " + url);
+#else
+  String url = String(INFLUXDB_URL) + "/api/v2/write?bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
+  Serial.println("InfluxDB (Cloud): " + url);
+#endif
   
   http.begin(client, url);
   http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
@@ -210,29 +225,27 @@ void sendToInfluxDB() {
   
   if (httpCode > 0) {
     if (httpCode == 204) {
-      Serial.println("InfluxDB: 204 OK");
+#if USE_LOCAL_INFLUXDB
+      Serial.println("✅ InfluxDB (Local): 204 OK");
+#else
+      Serial.println("✅ InfluxDB (Cloud): 204 OK");
+#endif
       
-      // Record success
-      influxBackoff.recordSuccess();
       metrics.lastSuccessfulInfluxSend = millis();
     } else {
       String response = http.getString();
-      Serial.println("InfluxDB Code " + String(httpCode));
-      
-      // Record failure for backoff
-      influxBackoff.recordFailure();
+      Serial.println("InfluxDB Code " + String(httpCode) + ": " + response);
       metrics.influxSendFailures++;
     }
   } else {
-    Serial.println("InfluxDB POST failed: " + String(http.errorToString(httpCode)));
-    
-    // Record failure for backoff
-    influxBackoff.recordFailure();
+    Serial.println("❌ InfluxDB POST failed: " + String(http.errorToString(httpCode)));
     metrics.influxSendFailures++;
   }
   http.end();
 }
 
+/*
+// DISABLED - Using InfluxDB only, no Lambda logging
 void sendToLambda() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected, skipping Lambda");
@@ -259,111 +272,59 @@ void sendToLambda() {
   
   Serial.println("Sending temperature to Lambda endpoint...");
   
-  http.begin(client, LAMBDA_ENDPOINT);
-  http.addHeader("Content-Type", "application/json");
+  // http.begin(client, LAMBDA_ENDPOINT);
+  // http.addHeader("Content-Type", "application/json");
   
   // Build JSON payload - simplified to reduce memory usage
   // Format: {"device":"Location","tempC":22.5,"tempF":72.5}
+  // Note: trim temperature strings to remove any leading/trailing whitespace from dtostrf()
+  String tempC = temperatureC;
+  String tempF = temperatureF;
+  tempC.trim();
+  tempF.trim();
+  
   char jsonBuffer[256];
   snprintf(jsonBuffer, sizeof(jsonBuffer), 
     "{\"device\":\"%s\",\"tempC\":%s,\"tempF\":%s}",
-    DEVICE_LOCATION, temperatureC.c_str(), temperatureF.c_str());
+    DEVICE_LOCATION, tempC.c_str(), tempF.c_str());
   
   String payload(jsonBuffer);
   
   Serial.println("Lambda payload size: " + String(payload.length()) + " bytes");
   
-  int httpCode = http.POST(payload);
-  Serial.println("Lambda HTTP Code: " + String(httpCode));
+  // int httpCode = http.POST(payload);
+  // Serial.println("Lambda HTTP Code: " + String(httpCode));
   
-  if (httpCode > 0) {
-    if (httpCode == 200 || httpCode == 204) {
-      String response = http.getString();
-      Serial.println("Lambda response: " + response);
-      Serial.println("✅ Data sent to Lambda successfully!");
-      
-      // Record success
-      lambdaBackoff.recordSuccess();
-      metrics.lastSuccessfulLambdaSend = millis();
-    } else {
-      String response = http.getString();
-      Serial.println("❌ Lambda Error " + String(httpCode) + ": " + response);
-      
-      // Record failure for backoff
-      lambdaBackoff.recordFailure();
-      metrics.lambdaSendFailures++;
-    }
-  } else {
-    Serial.println("❌ Lambda POST error: " + String(http.errorToString(httpCode)));
-    
-    // Record failure for backoff
-    lambdaBackoff.recordFailure();
-    metrics.lambdaSendFailures++;
-  }
+  // if (httpCode > 0) {
+  //   if (httpCode == 200 || httpCode == 204) {
+  //     String response = http.getString();
+  //     Serial.println("Lambda response: " + response);
+  //     Serial.println("✅ Data sent to Lambda successfully!");
+  //     
+  //     // Record success
+  //     lambdaBackoff.recordSuccess();
+  //     metrics.lastSuccessfulLambdaSend = millis();
+  //   } else {
+  //     String response = http.getString();
+  //     Serial.println("❌ Lambda Error " + String(httpCode) + ": " + response);
+  //     
+  //     // Record failure for backoff
+  //     lambdaBackoff.recordFailure();
+  //     metrics.lambdaSendFailures++;
+  //   }
+  // } else {
+  //   Serial.println("❌ Lambda POST error: " + String(http.errorToString(httpCode)));
+  //   
+  //   // Record failure for backoff
+  //   lambdaBackoff.recordFailure();
+  //   metrics.lambdaSendFailures++;
+  // }
   
-  http.end();
+  // http.end();
 }
+*/
 
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.7.2/css/all.css" integrity="sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr" crossorigin="anonymous">
-  <style>
-    html {
-     font-family: Arial;
-     display: inline-block;
-     margin: 0px auto;
-     text-align: center;
-    }
-    h2 { font-size: 2.0rem; }
-    p { font-size: 2.0rem; }
-    .units { font-size: 1.0rem; }
-    .ds-labels{
-      font-size: 1.2rem;
-      vertical-align:middle;
-      padding-bottom: 15px;
-    }
-  </style>
-</head>
-<body>
-  <h2>%PAGE_TITLE%</h2>
-  <p>
-    <i class="fas fa-thermometer-half" style="color:#059e8a;"></i> 
-    <span class="ds-labels"></span> 
-    <span id="temperaturec">%TEMPERATUREC%</span>
-    <sup class="units">&deg;C</sup>
-  </p>
-  <p>
-    <i class="fas fa-thermometer-half" style="color:#059e8a;"></i> 
-    <span class="ds-labels"></span> 
-    <span id="temperaturef">%TEMPERATUREF%</span>
-    <sup class="units">&deg;F</sup>
-  </p>
-</body>
-<script>
-setInterval(function ( ) {
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-      document.getElementById("temperaturec").innerHTML = this.responseText;
-    }
-  };
-  xhttp.open("GET", "/temperaturec", true);
-  xhttp.send();
-}, 10000) ;
-setInterval(function ( ) {
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-      document.getElementById("temperaturef").innerHTML = this.responseText;
-    }
-  };
-  xhttp.open("GET", "/temperaturef", true);
-  xhttp.send();
-}, 10000) ;
-</script>
-</html>)rawliteral";
+const char index_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>%PAGE_TITLE%</title><style>body{margin:0;padding:8px;background:#0f172a;font-family:system-ui;color:#e2e8f0;text-align:center}.c{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;max-width:350px;margin:0 auto}.h{margin-bottom:12px}.dn{font-size:1.3rem;font-weight:600;color:#94a3b8;margin-bottom:4px}.st{font-size:0.8rem;color:#94a3b8}.si{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:4px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.5}}.td{background:linear-gradient(135deg,#1e3a5f,#0f172a);border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:12px}.tdc{display:flex;justify-content:center;align-items:baseline;gap:4px}.tv{font-size:3rem;font-weight:700;color:#38bdf8}.tu{font-size:0.9rem;color:#94a3b8}.f{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;display:flex;justify-content:center;align-items:center;gap:6px}.tl{font-size:0.85rem;color:#94a3b8}.tr{font-size:1.5rem;font-weight:700;color:#38bdf8}.ft{margin-top:12px;padding-top:8px;border-top:1px solid #334155;font-size:0.7rem;color:#64748b}</style></head><body><div class="c"><div class="h"><div class="dn">%PAGE_TITLE%</div><div><span class="si"></span><span class="st">Live</span></div></div><div class="td"><div class="tdc"><div class="tv" id="tc">%TEMPERATUREC%</div><div class="tu">°C</div></div></div><div class="f"><span class="tr" id="tf">%TEMPERATUREF%</span><span class="tl">°F</span></div><div class="ft">Updates every 15s</div></div><script>function u(){fetch('/temperaturec').then(r=>r.text()).then(d=>{document.getElementById('tc').textContent=d}).catch(e=>{});fetch('/temperaturef').then(r=>r.text()).then(d=>{document.getElementById('tf').textContent=d}).catch(e=>{});}u();setInterval(u,15000);</script></body></html>)rawliteral";
 
 // Replaces placeholder with DS18B20 values
 String processor(const String& var){
@@ -418,8 +379,7 @@ String getHealthStatus() {
   // Backoff status
   doc["backoff"]["lambda_active"] = (lambdaBackoff.getConsecutiveFailures() > 0);
   doc["backoff"]["lambda_failures"] = lambdaBackoff.getConsecutiveFailures();
-  doc["backoff"]["influx_active"] = (influxBackoff.getConsecutiveFailures() > 0);
-  doc["backoff"]["influx_failures"] = influxBackoff.getConsecutiveFailures();
+
   
   // Last successful sends
   if (metrics.lastSuccessfulLambdaSend > 0) {
@@ -485,8 +445,8 @@ void setup(){
     if (WiFi.status() == WL_CONNECTED) {
       wifiConnected = true;
       Serial.println("✅ WiFi connected to: " + String(wifi_networks[netIndex].ssid));
-      Serial.println("IP: " + WiFi.localIP().toString());
-      Serial.println("Signal strength: " + String(WiFi.RSSI()) + " dBm");
+      Serial.println("📍 IP Address: " + WiFi.localIP().toString());
+      Serial.println("📡 Signal strength: " + String(WiFi.RSSI()) + " dBm");
     } else {
       Serial.println("❌ Failed to connect to " + String(wifi_networks[netIndex].ssid));
       if (netIndex < NUM_WIFI_NETWORKS - 1) {
@@ -526,7 +486,7 @@ void setup(){
 }
  
 void loop(){
-  // Non-blocking WiFi connection check
+  // Non-blocking WiFi connection check with WiFi-specific backoff
   unsigned long now = millis();
   if (now - lastWiFiCheck > WIFI_CHECK_INTERVAL) {
     lastWiFiCheck = now;
@@ -557,8 +517,8 @@ void loop(){
   if ((millis() - lastTime) > timerDelay) {
     updateTemperatures();
     if (temperatureC != "--") {
-      sendToLambda();  // Send to AWS Lambda endpoint
-      sendToInfluxDB();  // Also send to InfluxDB
+      // sendToLambda();  // Disabled - sending to InfluxDB only
+      sendToInfluxDB();  // Send to local or cloud InfluxDB
     }
     lastTime = millis();
   }
