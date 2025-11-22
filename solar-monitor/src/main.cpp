@@ -22,6 +22,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 
 #include "VictronSmartShunt.h"
 #include "VictronMPPT.h"
@@ -74,6 +75,17 @@ void handleBatteryData();
 void handleSolarData();
 void handleSystemData();
 void printStatus();
+void sendDataToInfluxDB();
+
+// ============================================================================
+// InfluxDB Configuration
+// ============================================================================
+
+// Data sending interval (ms)
+#define INFLUXDB_SEND_INTERVAL 30000  // Send data every 30 seconds
+
+// Status tracking
+unsigned long lastInfluxDBSend = 0;
 
 // ============================================================================
 // Setup
@@ -132,6 +144,12 @@ void loop() {
     if (millis() - lastStatusPrint >= STATUS_INTERVAL) {
         printStatus();
         lastStatusPrint = millis();
+    }
+
+    // Periodic InfluxDB data sending
+    if (millis() - lastInfluxDBSend >= INFLUXDB_SEND_INTERVAL) {
+        sendDataToInfluxDB();
+        lastInfluxDBSend = millis();
     }
 
     // Small delay to prevent watchdog issues
@@ -397,4 +415,83 @@ void printStatus() {
         ESP.getFreeHeap());
 
     Serial.println("---------------------");
+}
+
+// ============================================================================
+// InfluxDB Data Sending
+// ============================================================================
+
+void sendDataToInfluxDB() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[InfluxDB] WiFi not connected, skipping data send");
+        return;
+    }
+
+    HTTPClient http;
+    http.setTimeout(5000);  // 5 second timeout
+
+    // Build InfluxDB URL with authentication
+    String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + INFLUXDB_ORG + "&bucket=" + INFLUXDB_BUCKET;
+    http.begin(url);
+    http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
+    http.addHeader("Content-Type", "text/plain; charset=utf-8");
+
+    // Build line protocol data
+    String data = "";
+
+    // Battery data (SmartShunt)
+    if (smartShunt.isDataValid()) {
+        data += "battery,device=solar-monitor,location=garage ";
+        data += "voltage=" + String(smartShunt.getBatteryVoltage(), 3) + ",";
+        data += "current=" + String(smartShunt.getBatteryCurrent(), 3) + ",";
+        data += "soc=" + String(smartShunt.getStateOfCharge(), 1) + ",";
+        data += "time_remaining=" + String(smartShunt.getTimeRemaining()) + ",";
+        data += "consumed_ah=" + String(smartShunt.getConsumedAh(), 3) + ",";
+        data += "alarm=" + String(smartShunt.getAlarmState() ? 1 : 0) + ",";
+        data += "relay=" + String(smartShunt.getRelayState() ? 1 : 0) + ",";
+        data += "min_voltage=" + String(smartShunt.getMinVoltage(), 3) + ",";
+        data += "max_voltage=" + String(smartShunt.getMaxVoltage(), 3) + ",";
+        data += "charge_cycles=" + String(smartShunt.getChargeCycles()) + ",";
+        data += "deepest_discharge=" + String(smartShunt.getDeepestDischarge(), 3) + ",";
+        data += "last_discharge=" + String(smartShunt.getLastDischarge(), 3);
+        data += "\n";
+    }
+
+    // Solar data (MPPT)
+    if (mppt.isDataValid()) {
+        data += "solar,device=solar-monitor,location=garage ";
+        data += "pv_voltage=" + String(mppt.getPanelVoltage(), 3) + ",";
+        data += "pv_power=" + String(mppt.getPanelPower(), 1) + ",";
+        data += "battery_voltage=" + String(mppt.getBatteryVoltage(), 3) + ",";
+        data += "charge_current=" + String(mppt.getChargeCurrent(), 3) + ",";
+        data += "charge_state=\"" + mppt.getChargeState() + "\",";
+        data += "error_code=" + String(mppt.getErrorCode()) + ",";
+        data += "yield_today=" + String(mppt.getYieldToday(), 3) + ",";
+        data += "yield_yesterday=" + String(mppt.getYieldYesterday(), 3) + ",";
+        data += "yield_total=" + String(mppt.getYieldTotal(), 3) + ",";
+        data += "max_power_today=" + String(mppt.getMaxPowerToday()) + ",";
+        data += "max_power_yesterday=" + String(mppt.getMaxPowerYesterday());
+        data += "\n";
+    }
+
+    // System data
+    data += "system,device=solar-monitor,location=garage ";
+    data += "uptime=" + String((millis() - bootTime) / 1000) + ",";
+    data += "wifi_rssi=" + String(WiFi.RSSI()) + ",";
+    data += "free_heap=" + String(ESP.getFreeHeap()) + ",";
+    data += "wifi_connected=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
+    data += "\n";
+
+    // Send the data
+    Serial.println("[InfluxDB] Sending data...");
+    int httpResponseCode = http.POST(data);
+
+    if (httpResponseCode > 0) {
+        Serial.printf("[InfluxDB] Data sent successfully, response: %d\n", httpResponseCode);
+    } else {
+        Serial.printf("[InfluxDB] Failed to send data, error: %d\n", httpResponseCode);
+        Serial.println("[InfluxDB] Response: " + http.getString());
+    }
+
+    http.end();
 }
