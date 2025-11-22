@@ -50,11 +50,14 @@ For detailed setup instructions, see [docs/SETUP.md](docs/SETUP.md).
 ├── lib/                    # Local libraries (OneWire, DallasTemperature)
 ├── test/                   # Test files
 ├── docs/                   # Documentation (organized by category)
-│   ├── api/               # AWS Lambda, InfluxDB, MQTT docs
+│   ├── api/               # InfluxDB, MQTT integration docs
 │   ├── guides/            # How-to guides
 │   ├── architecture/      # Technical design
+│   ├── pcb_design/        # Custom PCB designs
+│   │   ├── usb-powered/   # USB-C powered board (v1.0)
+│   │   └── solar-battery/ # Solar variant (planned)
 │   └── reference/         # Reference material
-├── scripts/               # Utility scripts (flash, deploy, CDK)
+├── scripts/               # Utility scripts (flash, deploy)
 ├── platformio.ini         # PlatformIO configuration
 └── .gitignore            # Git ignore rules
 ```
@@ -72,6 +75,7 @@ For detailed setup instructions, see [docs/SETUP.md](docs/SETUP.md).
 - [Code Structure](docs/architecture/CODE_STRUCTURE.md) - Technical implementation details
 - [Device Flashing](docs/guides/) - How to flash and deploy devices
 - [API Integration](docs/api/) - InfluxDB and MQTT integration guides
+- [PCB Designs](docs/pcb_design/) - Custom PCB schematics and manufacturing files
 - [Raspberry Pi Infrastructure](https://github.com/aachtenberg/raspberry-pi-docker) - Docker stack setup
 
 ## Security Note

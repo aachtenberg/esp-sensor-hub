@@ -66,10 +66,16 @@ docs/
 ├── architecture/                # Technical design docs
 │   ├── CODE_STRUCTURE.md
 │   └── WIFI_FALLBACK.md
-├── reference/                   # Reference material
-│   └── COPILOT_INSTRUCTIONS.md
-└── archive/                     # Legacy/deprecated docs
-    └── AWS_CDK_SETUP.md        # Old AWS CloudWatch setup (no longer used)
+├── pcb_design/                  # Custom PCB designs
+│   ├── README.md               # PCB overview and comparison
+│   ├── usb-powered/            # USB-C powered board (v1.0)
+│   │   ├── SCHEMATIC.md
+│   │   ├── BOARD_LAYOUT.md
+│   │   ├── BOM.md
+│   │   └── ORDERING_GUIDE.md
+│   └── solar-battery/          # Solar/battery variant (planned)
+└── reference/                   # Reference material
+    └── COPILOT_INSTRUCTIONS.md
 ```
 
 ## Current Data Flow
@@ -185,15 +191,16 @@ influx query 'from(bucket: "sensor_data") |> range(start: -24h) |> filter(fn: (r
 
 See [guides/TROUBLESHOOTING.md](guides/TROUBLESHOOTING.md) for more solutions.
 
-## Legacy Documentation
+## Hardware
 
-### AWS Integration (Deprecated)
-This project originally used AWS Lambda and CloudWatch for logging. This has been replaced with local InfluxDB.
+### Custom PCB Designs
 
-Legacy documentation archived in:
-- [archive/AWS_CDK_SETUP.md](archive/AWS_CDK_SETUP.md) - CloudWatch Dashboard setup (no longer used)
+This project includes custom PCB designs for production-ready deployments:
 
-The AWS Lambda endpoint configuration in `include/secrets.h` is commented out and kept for reference only.
+- **[USB-Powered Board](pcb_design/usb-powered/)** - Compact USB-C powered board for indoor use (v1.0, ordered)
+- **Solar-Battery Board** - Solar/battery powered variant for outdoor use (planned)
+
+See [pcb_design/README.md](pcb_design/README.md) for design comparison and manufacturing instructions.
 
 ## Contributing
 
