@@ -40,6 +40,7 @@
 #include "VictronSmartShunt.h"
 #include "VictronMPPT.h"
 #include "secrets.h"
+#include "display.h"
 
 // Double Reset Detector configuration
 #define DRD_TIMEOUT 3           // Seconds to wait for second reset
@@ -91,6 +92,7 @@ WebServer server(HTTP_PORT);
 
 // Status tracking
 unsigned long lastStatusPrint = 0;
+unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime = 0;
 
 // ============================================================================
@@ -242,6 +244,9 @@ void setup() {
     mppt1.begin();
     mppt2.begin();
 
+    // Initialize OLED display
+    initDisplay();
+
     // Connect to WiFi
     setupWiFi();
 
@@ -355,6 +360,28 @@ void loop() {
     if (millis() - lastInfluxDBSend >= INFLUXDB_SEND_INTERVAL) {
         sendDataToInfluxDB();
         lastInfluxDBSend = millis();
+    }
+
+    // Update OLED display periodically
+    if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
+        // Get current data from SmartShunt
+        float batteryPercent = smartShunt.getStateOfCharge();
+        float batteryVoltage = smartShunt.getBatteryVoltage();
+        float batteryCurrent = smartShunt.getBatteryCurrent();
+        
+        // Get solar power from both MPPTs
+        float solarPower1 = mppt1.getPanelPower();
+        float solarPower2 = mppt2.getPanelPower();
+        
+        // Get WiFi status
+        bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+        String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
+        
+        // Update display
+        updateDisplay(batteryPercent, batteryVoltage, batteryCurrent,
+                     solarPower1, solarPower2, wifiConnected, ipStr.c_str());
+        
+        lastDisplayUpdate = millis();
     }
 
     // Small delay to prevent watchdog issues
