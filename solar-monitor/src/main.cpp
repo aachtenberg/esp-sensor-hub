@@ -377,9 +377,20 @@ void loop() {
         bool wifiConnected = (WiFi.status() == WL_CONNECTED);
         String ipStr = wifiConnected ? WiFi.localIP().toString() : "";
         
+        // Build daily stats from MPPTs
+        SolarDailyStats dailyStats;
+        dailyStats.yieldToday1 = mppt1.getYieldToday();
+        dailyStats.yieldToday2 = mppt2.getYieldToday();
+        dailyStats.yieldYesterday1 = mppt1.getYieldYesterday();
+        dailyStats.yieldYesterday2 = mppt2.getYieldYesterday();
+        dailyStats.maxPowerToday1 = mppt1.getMaxPowerToday();
+        dailyStats.maxPowerToday2 = mppt2.getMaxPowerToday();
+        dailyStats.maxPowerYesterday1 = mppt1.getMaxPowerYesterday();
+        dailyStats.maxPowerYesterday2 = mppt2.getMaxPowerYesterday();
+        
         // Update display
         updateDisplay(batteryPercent, batteryVoltage, batteryCurrent,
-                     solarPower1, solarPower2, wifiConnected, ipStr.c_str());
+                     solarPower1, solarPower2, wifiConnected, ipStr.c_str(), &dailyStats);
         
         lastDisplayUpdate = millis();
     }

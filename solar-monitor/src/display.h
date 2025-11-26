@@ -37,6 +37,7 @@
 enum DisplayPage {
     PAGE_BATTERY,
     PAGE_SOLAR,
+    PAGE_DAILY_STATS,
     PAGE_SYSTEM,
     PAGE_COUNT
 };
@@ -50,12 +51,26 @@ extern DisplayPage currentPage;
 extern unsigned long lastPageChange;
 extern const unsigned long PAGE_CYCLE_INTERVAL;
 
+// Solar stats structure for daily data
+struct SolarDailyStats {
+    float yieldToday1;      // MPPT1 yield today (kWh)
+    float yieldToday2;      // MPPT2 yield today (kWh)
+    float yieldYesterday1;  // MPPT1 yield yesterday (kWh)
+    float yieldYesterday2;  // MPPT2 yield yesterday (kWh)
+    int maxPowerToday1;     // MPPT1 max power today (W)
+    int maxPowerToday2;     // MPPT2 max power today (W)
+    int maxPowerYesterday1; // MPPT1 max power yesterday (W)
+    int maxPowerYesterday2; // MPPT2 max power yesterday (W)
+};
+
 // Function declarations
 void initDisplay();
 void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurrent,
-                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress);
+                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress,
+                   const SolarDailyStats* dailyStats = nullptr);
 void drawBatteryPage(float percent, float voltage, float current);
 void drawSolarPage(float power1, float power2);
+void drawDailyStatsPage(const SolarDailyStats* stats);
 void drawSystemPage(bool wifiConnected, const char* ipAddress, unsigned long uptimeMs);
 void drawProgressBar(int x, int y, int width, int height, int percent);
 void nextDisplayPage();

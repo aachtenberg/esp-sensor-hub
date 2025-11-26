@@ -53,8 +53,17 @@ void initDisplay() {
 // Main Display Update Function
 // ============================================================================
 
+// Store daily stats for use across function calls
+static SolarDailyStats cachedDailyStats = {0};
+
 void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurrent,
-                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress) {
+                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress,
+                   const SolarDailyStats* dailyStats) {
+    
+    // Cache daily stats if provided
+    if (dailyStats != nullptr) {
+        cachedDailyStats = *dailyStats;
+    }
     
     // Auto-cycle pages
     if (millis() - lastPageChange >= PAGE_CYCLE_INTERVAL) {
@@ -71,6 +80,9 @@ void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurr
             break;
         case PAGE_SOLAR:
             drawSolarPage(solarPower1, solarPower2);
+            break;
+        case PAGE_DAILY_STATS:
+            drawDailyStatsPage(&cachedDailyStats);
             break;
         case PAGE_SYSTEM:
             drawSystemPage(wifiConnected, ipAddress, millis());
@@ -165,6 +177,48 @@ void drawSolarPage(float power1, float power2) {
 }
 
 // ============================================================================
+// Daily Stats Page
+// ============================================================================
+
+void drawDailyStatsPage(const SolarDailyStats* stats) {
+    // Title
+    display.setFont(u8g2_font_7x13B_tf);
+    display.drawStr(0, 0, "DAILY STATS");
+    
+    display.setFont(u8g2_font_6x10_tf);
+    
+    if (stats == nullptr) {
+        display.drawStr(20, 30, "No data");
+        return;
+    }
+    
+    // Today's total yield
+    float totalToday = stats->yieldToday1 + stats->yieldToday2;
+    float totalYesterday = stats->yieldYesterday1 + stats->yieldYesterday2;
+    int maxPowerToday = stats->maxPowerToday1 + stats->maxPowerToday2;
+    
+    // Today yield (large)
+    display.setFont(u8g2_font_logisoso16_tn);
+    char yieldStr[16];
+    snprintf(yieldStr, sizeof(yieldStr), "%.2f", totalToday);
+    int yieldWidth = display.getStrWidth(yieldStr);
+    display.drawStr((128 - yieldWidth - 24) / 2, 14, yieldStr);
+    display.setFont(u8g2_font_6x10_tf);
+    display.drawStr((128 + yieldWidth - 24) / 2 + 4, 20, "kWh");
+    
+    // Yesterday comparison
+    display.setFont(u8g2_font_5x8_tf);
+    char yesterdayStr[24];
+    snprintf(yesterdayStr, sizeof(yesterdayStr), "Yesterday: %.2f kWh", totalYesterday);
+    display.drawStr(4, 36, yesterdayStr);
+    
+    // Max power today
+    char maxStr[24];
+    snprintf(maxStr, sizeof(maxStr), "Peak: %dW", maxPowerToday);
+    display.drawStr(4, 46, maxStr);
+}
+
+// ============================================================================
 // System Status Page
 // ============================================================================
 
@@ -249,12 +303,14 @@ void initDisplay() {
 }
 
 void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurrent,
-                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress) {
+                   float solarPower1, float solarPower2, bool wifiConnected, const char* ipAddress,
+                   const SolarDailyStats* dailyStats) {
     // Do nothing - display disabled
 }
 
 void drawBatteryPage(float percent, float voltage, float current) {}
 void drawSolarPage(float power1, float power2) {}
+void drawDailyStatsPage(const SolarDailyStats* stats) {}
 void drawSystemPage(bool wifiConnected, const char* ipAddress, unsigned long uptimeMs) {}
 void drawProgressBar(int x, int y, int width, int height, int percent) {}
 void nextDisplayPage() {}
