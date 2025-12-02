@@ -93,15 +93,15 @@ void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurr
     }
     
     // Draw page indicator dots at bottom
-    int dotY = 60;
-    int dotSpacing = 10;
+    int dotY = 62;
+    int dotSpacing = 6;
     int startX = 64 - (PAGE_COUNT * dotSpacing / 2);
     for (int i = 0; i < PAGE_COUNT; i++) {
         int x = startX + (i * dotSpacing);
         if (i == currentPage) {
-            display.drawDisc(x, dotY, 2);  // Filled circle for current page
+            display.drawDisc(x, dotY, 1);  // Filled circle for current page
         } else {
-            display.drawCircle(x, dotY, 2);  // Empty circle for other pages
+            display.drawCircle(x, dotY, 1);  // Empty circle for other pages
         }
     }
     
@@ -114,34 +114,32 @@ void updateDisplay(float batteryPercent, float batteryVoltage, float batteryCurr
 
 void drawBatteryPage(float percent, float voltage, float current) {
     // Title
-    display.setFont(u8g2_font_7x13B_tf);
+    display.setFont(u8g2_font_9x15B_tf);
     display.drawStr(0, 0, "BATTERY");
-    
-    // WiFi indicator in top right (small)
-    display.setFont(u8g2_font_5x7_tf);
-    
+
     // Large battery percentage
-    display.setFont(u8g2_font_logisoso22_tn);
+    display.setFont(u8g2_font_logisoso32_tn);
     char percentStr[8];
-    snprintf(percentStr, sizeof(percentStr), "%.0f%%", percent);
-    
+    snprintf(percentStr, sizeof(percentStr), "%.0f", percent);
+
     // Center the percentage
     int percentWidth = display.getStrWidth(percentStr);
-    display.drawStr((128 - percentWidth) / 2, 14, percentStr);
-    
-    // Progress bar for battery level
-    drawProgressBar(4, 40, 120, 10, (int)percent);
-    
-    // Voltage and current on bottom line
-    display.setFont(u8g2_font_5x8_tf);
+    display.drawStr((128 - percentWidth - 20) / 2, 18, percentStr);
+
+    // Add % symbol separately in smaller font
+    display.setFont(u8g2_font_10x20_tf);
+    display.drawStr((128 + percentWidth - 20) / 2 + 2, 28, "%");
+
+    // Voltage and current on bottom line (larger)
+    display.setFont(u8g2_font_8x13_tf);
     char voltStr[16], currStr[16];
     snprintf(voltStr, sizeof(voltStr), "%.1fV", voltage);
     snprintf(currStr, sizeof(currStr), "%.1fA", current);
-    display.drawStr(4, 52, voltStr);
-    
+    display.drawStr(2, 52, voltStr);
+
     // Right-align current
     int currWidth = display.getStrWidth(currStr);
-    display.drawStr(124 - currWidth, 52, currStr);
+    display.drawStr(126 - currWidth, 52, currStr);
 }
 
 // ============================================================================
@@ -150,30 +148,35 @@ void drawBatteryPage(float percent, float voltage, float current) {
 
 void drawSolarPage(float power1, float power2) {
     float totalPower = power1 + power2;
-    
+
     // Title
-    display.setFont(u8g2_font_7x13B_tf);
+    display.setFont(u8g2_font_9x15B_tf);
     display.drawStr(0, 0, "SOLAR");
-    
+
     // Total power (large)
-    display.setFont(u8g2_font_logisoso18_tn);
+    display.setFont(u8g2_font_logisoso26_tn);
     char totalStr[12];
-    snprintf(totalStr, sizeof(totalStr), "%.0fW", totalPower);
+    snprintf(totalStr, sizeof(totalStr), "%.0f", totalPower);
     int totalWidth = display.getStrWidth(totalStr);
-    display.drawStr((128 - totalWidth) / 2, 14, totalStr);
-    
-    // Individual MPPT readings
-    display.setFont(u8g2_font_6x10_tf);
-    
+    display.drawStr((128 - totalWidth - 16) / 2, 18, totalStr);
+
+    // Add W separately
+    display.setFont(u8g2_font_9x15_tf);
+    display.drawStr((128 + totalWidth - 16) / 2 + 2, 30, "W");
+
+    // Individual MPPT readings (larger)
+    display.setFont(u8g2_font_8x13_tf);
+
     // MPPT1
     char mppt1Str[20];
-    snprintf(mppt1Str, sizeof(mppt1Str), "MPPT1: %.0fW", power1);
-    display.drawStr(4, 38, mppt1Str);
-    
+    snprintf(mppt1Str, sizeof(mppt1Str), "M1: %.0fW", power1);
+    display.drawStr(2, 50, mppt1Str);
+
     // MPPT2
     char mppt2Str[20];
-    snprintf(mppt2Str, sizeof(mppt2Str), "MPPT2: %.0fW", power2);
-    display.drawStr(4, 50, mppt2Str);
+    snprintf(mppt2Str, sizeof(mppt2Str), "M2: %.0fW", power2);
+    int mppt2Width = display.getStrWidth(mppt2Str);
+    display.drawStr(126 - mppt2Width, 50, mppt2Str);
 }
 
 // ============================================================================
@@ -182,40 +185,40 @@ void drawSolarPage(float power1, float power2) {
 
 void drawDailyStatsPage(const SolarDailyStats* stats) {
     // Title
-    display.setFont(u8g2_font_7x13B_tf);
-    display.drawStr(0, 0, "DAILY STATS");
-    
-    display.setFont(u8g2_font_6x10_tf);
-    
+    display.setFont(u8g2_font_9x15B_tf);
+    display.drawStr(0, 0, "TODAY");
+
     if (stats == nullptr) {
-        display.drawStr(20, 30, "No data");
+        display.setFont(u8g2_font_8x13_tf);
+        display.drawStr(30, 30, "No data");
         return;
     }
-    
+
     // Today's total yield
     float totalToday = stats->yieldToday1 + stats->yieldToday2;
     float totalYesterday = stats->yieldYesterday1 + stats->yieldYesterday2;
     int maxPowerToday = stats->maxPowerToday1 + stats->maxPowerToday2;
-    
+
     // Today yield (large)
-    display.setFont(u8g2_font_logisoso16_tn);
+    display.setFont(u8g2_font_logisoso24_tn);
     char yieldStr[16];
-    snprintf(yieldStr, sizeof(yieldStr), "%.2f", totalToday);
+    snprintf(yieldStr, sizeof(yieldStr), "%.1f", totalToday);
     int yieldWidth = display.getStrWidth(yieldStr);
-    display.drawStr((128 - yieldWidth - 24) / 2, 14, yieldStr);
-    display.setFont(u8g2_font_6x10_tf);
-    display.drawStr((128 + yieldWidth - 24) / 2 + 4, 20, "kWh");
-    
-    // Yesterday comparison
-    display.setFont(u8g2_font_5x8_tf);
-    char yesterdayStr[24];
-    snprintf(yesterdayStr, sizeof(yesterdayStr), "Yesterday: %.2f kWh", totalYesterday);
-    display.drawStr(4, 36, yesterdayStr);
-    
-    // Max power today
-    char maxStr[24];
-    snprintf(maxStr, sizeof(maxStr), "Peak: %dW", maxPowerToday);
-    display.drawStr(4, 46, maxStr);
+    display.drawStr((128 - yieldWidth - 30) / 2, 18, yieldStr);
+    display.setFont(u8g2_font_8x13_tf);
+    display.drawStr((128 + yieldWidth - 30) / 2 + 4, 28, "kWh");
+
+    // Yesterday and peak (larger)
+    display.setFont(u8g2_font_7x13_tf);
+    char yesterdayStr[20];
+    snprintf(yesterdayStr, sizeof(yesterdayStr), "Yday: %.1f", totalYesterday);
+    display.drawStr(2, 48, yesterdayStr);
+
+    // Peak power
+    char maxStr[20];
+    snprintf(maxStr, sizeof(maxStr), "Pk:%dW", maxPowerToday);
+    int maxWidth = display.getStrWidth(maxStr);
+    display.drawStr(126 - maxWidth, 48, maxStr);
 }
 
 // ============================================================================
@@ -224,43 +227,44 @@ void drawDailyStatsPage(const SolarDailyStats* stats) {
 
 void drawSystemPage(bool wifiConnected, const char* ipAddress, unsigned long uptimeMs) {
     // Title
-    display.setFont(u8g2_font_7x13B_tf);
+    display.setFont(u8g2_font_9x15B_tf);
     display.drawStr(0, 0, "SYSTEM");
-    
-    display.setFont(u8g2_font_6x10_tf);
-    
+
+    display.setFont(u8g2_font_8x13_tf);
+
     // WiFi status
-    display.drawStr(4, 16, "WiFi:");
+    display.drawStr(2, 18, "WiFi:");
     if (wifiConnected) {
-        display.drawStr(40, 16, "Connected");
+        display.drawStr(48, 18, "OK");
     } else {
-        display.drawStr(40, 16, "Disconnected");
+        display.drawStr(48, 18, "OFF");
     }
-    
-    // IP Address
-    display.drawStr(4, 28, "IP:");
+
+    // IP Address (smaller font for long IPs)
+    display.setFont(u8g2_font_7x13_tf);
+    display.drawStr(2, 32, "IP:");
     if (ipAddress && strlen(ipAddress) > 0) {
-        display.drawStr(24, 28, ipAddress);
+        display.drawStr(24, 32, ipAddress);
     } else {
-        display.drawStr(24, 28, "---");
+        display.drawStr(24, 32, "---");
     }
-    
+
     // Uptime
     unsigned long seconds = uptimeMs / 1000;
     unsigned long minutes = seconds / 60;
     unsigned long hours = minutes / 60;
     unsigned long days = hours / 24;
-    
+
+    display.setFont(u8g2_font_8x13_tf);
     char uptimeStr[24];
     if (days > 0) {
-        snprintf(uptimeStr, sizeof(uptimeStr), "%lud %02luh %02lum", days, hours % 24, minutes % 60);
+        snprintf(uptimeStr, sizeof(uptimeStr), "%lud %02luh", days, hours % 24);
     } else if (hours > 0) {
-        snprintf(uptimeStr, sizeof(uptimeStr), "%luh %02lum %02lus", hours, minutes % 60, seconds % 60);
+        snprintf(uptimeStr, sizeof(uptimeStr), "%luh %02lum", hours, minutes % 60);
     } else {
         snprintf(uptimeStr, sizeof(uptimeStr), "%lum %02lus", minutes, seconds % 60);
     }
-    display.drawStr(4, 40, "Uptime:");
-    display.drawStr(4, 50, uptimeStr);
+    display.drawStr(2, 50, uptimeStr);
 }
 
 // ============================================================================

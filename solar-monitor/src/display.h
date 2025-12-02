@@ -19,7 +19,7 @@
 // Set to 0 to disable OLED (when hardware not connected)
 // Set to 1 to enable OLED display
 // ============================================================================
-#define OLED_ENABLED 0
+#define OLED_ENABLED 1
 
 #include <Arduino.h>
 #include <U8g2lib.h>
