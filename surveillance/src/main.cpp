@@ -492,6 +492,15 @@ void setupWebServer() {
         doc["psram_free"] = ESP.getFreePsram();
         doc["camera_ready"] = cameraReady;
         doc["mqtt_connected"] = mqttConnected;
+        doc["motion_enabled"] = motionEnabled;
+
+        if (cameraReady) {
+            sensor_t *s = esp_camera_sensor_get();
+            if (s) {
+                doc["framesize"] = s->status.framesize;
+                doc["quality"] = s->status.quality;
+            }
+        }
 
         String output;
         serializeJson(doc, output);
