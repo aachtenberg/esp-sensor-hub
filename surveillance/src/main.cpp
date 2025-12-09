@@ -729,50 +729,111 @@ void handleRoot(AsyncWebServerRequest *request) {
 <title>ESP32-S3 Surveillance</title>
 <style>
 :root{--bg:#0b0f14;--panel:#121821;--panel-alt:#0f141c;--border:#1f2a38;--text:#e6edf3;--muted:#9aa7b2;--accent:#00bcd4;--accent-contrast:#07343b;--danger:#ff5252;}
-body{font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);font-size:16px}
+*{box-sizing:border-box}
+body{font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);font-size:14px;margin:0;padding:0;height:100vh;overflow:hidden}
 a{color:var(--text)}
-section.main{display:flex;flex-direction:column}
-#menu{display:none;flex-direction:column;flex-wrap:nowrap;color:var(--text);width:380px;background:var(--panel);padding:10px;border-radius:8px;margin-top:-10px;margin-right:10px;border:1px solid var(--border)}
-figure{padding:0;margin:0}
-figure img{display:block;max-width:100%;width:auto;height:auto;border-radius:8px;margin-top:8px}
-#nav-toggle{cursor:pointer;display:block}
-#nav-toggle-cb{outline:0;opacity:0;width:0;height:0}
-#nav-toggle-cb:checked+#menu{display:flex}
-.input-group{display:flex;flex-wrap:nowrap;line-height:22px;margin:8px 0;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel-alt)}
-.input-group>label{display:inline-block;padding-right:10px;min-width:47%}
-.input-group input,.input-group select{flex-grow:1}
-.range-max,.range-min{display:inline-block;padding:0 5px;color:var(--muted)}
-button{display:block;margin:3px;padding:0 10px;border:0;line-height:28px;cursor:pointer;color:#001318;background:var(--accent);border-radius:8px;font-size:16px;outline:0;box-shadow:0 0 0 1px var(--accent-contrast) inset}
+.container{display:flex;flex-direction:column;height:100vh}
+#top-bar{background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+#controls-group{display:flex;gap:12px;align-items:center;flex:1;flex-wrap:wrap;min-width:0}
+#stream-area{display:flex;flex:1;min-height:0;gap:12px;padding:12px}
+#stream-container{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+#stream-container img{max-width:100%;max-height:100%;object-fit:contain}
+#right-panel{width:300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow-y:auto;display:flex;flex-direction:column}
+#right-toggle{display:none;width:30px;height:30px;padding:0;margin:0;background:var(--accent)}
+.panel-header{padding:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600}
+.panel-content{padding:12px;overflow-y:auto;flex:1}
+.input-group{display:flex;flex-wrap:nowrap;line-height:22px;margin:8px 0;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel-alt);gap:8px;align-items:center}
+.input-group>label{display:inline-block;min-width:100px;white-space:nowrap}
+.input-group input,.input-group select{flex:1;min-width:0}
+.range-max,.range-min{display:inline-block;padding:0 5px;color:var(--muted);font-size:12px}
+.control-row{display:flex;gap:8px;align-items:center}
+.control-row label{min-width:80px;white-space:nowrap}
+.control-row select,.control-row input[type=range]{flex:1}
+button{display:inline-block;margin:3px;padding:0 10px;border:0;line-height:28px;cursor:pointer;color:#001318;background:var(--accent);border-radius:8px;font-size:14px;outline:0;box-shadow:0 0 0 1px var(--accent-contrast) inset;white-space:nowrap}
 button:hover{filter:brightness(1.08)}
 button:active{filter:brightness(0.95)}
 button.disabled{cursor:default;opacity:.6}
-input[type=range]{-webkit-appearance:none;width:100%;height:22px;background:var(--panel-alt);cursor:pointer;margin:0;border-radius:6px}
+button.small{padding:0 8px;line-height:24px;font-size:12px}
+button.preset{flex:1;min-width:80px}
+.button-group{display:flex;gap:6px;flex-wrap:wrap}
+input[type=range]{-webkit-appearance:none;height:22px;background:var(--panel-alt);cursor:pointer;margin:0;border-radius:6px}
 input[type=range]:focus{outline:0}
 input[type=range]::-webkit-slider-runnable-track{width:100%;height:2px;cursor:pointer;background:var(--text);border-radius:0;border:0}
 input[type=range]::-webkit-slider-thumb{border:1px solid rgba(0,0,30,0);height:22px;width:22px;border-radius:50px;background:var(--accent);cursor:pointer;-webkit-appearance:none;margin-top:-11.5px}
-.switch{display:block;position:relative;line-height:22px;font-size:16px;height:22px}
+.switch{display:inline-block;position:relative;height:22px}
 .switch input{outline:0;opacity:0;width:0;height:0}
 .slider{width:50px;height:22px;border-radius:22px;cursor:pointer;background-color:#3a4b61;display:inline-block;transition:.4s}
-.slider:before{position:relative;content:"";border-radius:50%;height:16px;width:16px;left:4px;top:3px;background-color:#fff;display:inline-block;transition:.4s}
+.slider:before{position:absolute;content:"";border-radius:50%;height:16px;width:16px;left:4px;top:3px;background-color:#fff;display:inline-block;transition:.4s}
 input:checked+.slider{background-color:var(--accent)}
 input:checked+.slider:before{-webkit-transform:translateX(26px);transform:translateX(26px)}
-select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;border-radius:8px;background:var(--panel-alt);color:var(--text)}
-.image-container{position:relative;min-height:240px}
+select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;border-radius:8px;background:var(--panel-alt);color:var(--text);padding:2px 6px}
 .close{position:absolute;right:5px;top:5px;background:var(--danger);width:30px;height:30px;border-radius:100%;color:#fff;text-align:center;line-height:30px;cursor:pointer;box-shadow:0 0 0 1px #7a1e1e inset}
 .hidden{display:none}
-@media (min-width:800px) and (orientation:landscape){#content{display:flex;flex-wrap:nowrap;align-items:stretch}}
+.section-title{font-size:12px;font-weight:600;color:var(--muted);margin-top:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+@media (max-width:1200px){
+#right-panel{width:250px}
+.input-group>label{min-width:90px}
+}
+@media (max-width:768px){
+#top-bar{flex-direction:column;align-items:stretch}
+#stream-area{flex-direction:column;gap:8px;padding:8px}
+#right-panel{display:none;width:100%}
+#right-toggle{display:block}
+#right-panel.mobile-visible{display:flex;position:absolute;right:0;top:0;bottom:0;z-index:100;height:100vh;width:100%;max-width:85vw}
+}
 </style>
 </head>
 <body>
-<section class="main">
-<div id="logo">
-<label for="nav-toggle-cb" id="nav-toggle">&#9776;&nbsp;&nbsp;Settings&nbsp;&nbsp;&nbsp;&nbsp;</label>
-<button id="get-still" style="float:left;">Get Still</button>
-<button id="toggle-stream" style="float:left;">Start Stream</button>
+<div class="container">
+<div id="top-bar">
+<button id="get-still">Capture</button>
+<button id="toggle-stream">Start Stream</button>
+<div id="controls-group">
+<div class="control-row">
+<label for="framesize">Resolution:</label>
+<select id="framesize" class="default-action">
+<option value="13">UXGA</option>
+<option value="12">SXGA</option>
+<option value="11">HD</option>
+<option value="10">XGA</option>
+<option value="9">SVGA</option>
+<option value="8" selected="selected">VGA</option>
+<option value="7">HVGA</option>
+<option value="6">CIF</option>
+<option value="5">QVGA</option>
+<option value="3">HQVGA</option>
+<option value="1">QQVGA</option>
+</select>
 </div>
-<div id="content">
-<div class="hidden" id="sidebar">
-<input type="checkbox" id="nav-toggle-cb" checked="checked">
+<div class="control-row">
+<label for="quality">Quality:</label>
+<input type="range" id="quality" min="10" max="63" value="8" class="default-action" style="width:100px">
+</div>
+<div class="control-row">
+<label for="motion_enabled">Motion:</label>
+<div class="switch">
+<input id="motion_enabled" type="checkbox" checked="checked">
+<label class="slider" for="motion_enabled"></label>
+</div>
+</div>
+<div class="button-group">
+<button id="preset-smooth" class="preset small">Smooth</button>
+<button id="preset-balanced" class="preset small">Balanced</button>
+<button id="preset-detail" class="preset small">Detail</button>
+</div>
+</div>
+<button id="right-toggle">⚙</button>
+</div>
+<div id="stream-area">
+<div id="stream-container">
+<img id="stream" src="">
+</div>
+<div id="right-panel">
+<div class="panel-header">
+<span>Advanced Settings</span>
+<button id="close-panel" class="small" style="padding:0 6px;line-height:20px;margin:0">✕</button>
+</div>
+<div class="panel-content">
 <nav id="menu">
 <div class="input-group" id="motion-group">
 <label for="motion_enabled">Motion Detection</label>
@@ -805,26 +866,33 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="brightness-group">
 <label for="brightness">Brightness</label>
-<div class="range-min">-2</div>
-<input type="range" id="brightness" min="-2" max="2" value="0" class="default-action">
-<div class="range-max">2</div>
+<div style="display:flex;gap:4px;align-items:center;flex:1">
+<span class="range-min">-2</span>
+<input type="range" id="brightness" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
+</div>
 </div>
 <div class="input-group" id="contrast-group">
 <label for="contrast">Contrast</label>
-<div class="range-min">-2</div>
-<input type="range" id="contrast" min="-2" max="2" value="0" class="default-action">
-<div class="range-max">2</div>
+<div style="display:flex;gap:4px;align-items:center;flex:1">
+<span class="range-min">-2</span>
+<input type="range" id="contrast" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
+</div>
 </div>
 <div class="input-group" id="saturation-group">
 <label for="saturation">Saturation</label>
-<div class="range-min">-2</div>
-<input type="range" id="saturation" min="-2" max="2" value="0" class="default-action">
-<div class="range-max">2</div>
+<div style="display:flex;gap:4px;align-items:center;flex:1">
+<span class="range-min">-2</span>
+<input type="range" id="saturation" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
 </div>
+</div>
+<div class="section-title">Effects</div>
 <div class="input-group" id="special_effect-group">
-<label for="special_effect">Special Effect</label>
-<select id="special_effect" class="default-action">
-<option value="0" selected="selected">No Effect</option>
+<label for="special_effect">Effect</label>
+<select id="special_effect" class="default-action" style="flex:1">
+<option value="0" selected="selected">None</option>
 <option value="1">Negative</option>
 <option value="2">Grayscale</option>
 <option value="3">Red Tint</option>
@@ -833,6 +901,21 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <option value="6">Sepia</option>
 </select>
 </div>
+<div class="input-group" id="hmirror-group">
+<label for="hmirror">H-Mirror</label>
+<div class="switch">
+<input id="hmirror" type="checkbox" class="default-action">
+<label class="slider" for="hmirror"></label>
+</div>
+</div>
+<div class="input-group" id="vflip-group">
+<label for="vflip">V-Flip</label>
+<div class="switch">
+<input id="vflip" type="checkbox" class="default-action">
+<label class="slider" for="vflip"></label>
+</div>
+</div>
+<div class="section-title">Exposure & Gain</div>
 <div class="input-group" id="awb-group">
 <label for="awb">AWB</label>
 <div class="switch">
@@ -849,7 +932,7 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="wb_mode-group">
 <label for="wb_mode">WB Mode</label>
-<select id="wb_mode" class="default-action">
+<select id="wb_mode" class="default-action" style="flex:1">
 <option value="0" selected="selected">Auto</option>
 <option value="1">Sunny</option>
 <option value="2">Cloudy</option>
@@ -864,6 +947,30 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <label class="slider" for="aec"></label>
 </div>
 </div>
+<div class="input-group" id="aec_value-group">
+<label for="aec_value">Exposure</label>
+<div style="display:flex;gap:4px;align-items:center;flex:1">
+<span class="range-min">0</span>
+<input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action" style="flex:1">
+<span class="range-max">1200</span>
+</div>
+</div>
+<div class="input-group" id="agc-group">
+<label for="agc">AGC</label>
+<div class="switch">
+<input id="agc" type="checkbox" class="default-action" checked="checked">
+<label class="slider" for="agc"></label>
+</div>
+</div>
+<div class="input-group" id="gainceiling-group">
+<label for="gainceiling">Gain Ceiling</label>
+<div style="display:flex;gap:4px;align-items:center;flex:1">
+<span class="range-min">2x</span>
+<input type="range" id="gainceiling" min="0" max="6" value="0" class="default-action" style="flex:1">
+<span class="range-max">128x</span>
+</div>
+</div>
+<div class="section-title">Processing</div>
 <div class="input-group" id="aec2-group">
 <label for="aec2">AEC DSP</label>
 <div class="switch">
@@ -873,34 +980,11 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 </div>
 <div class="input-group" id="ae_level-group">
 <label for="ae_level">AE Level</label>
-<div class="range-min">-2</div>
-<input type="range" id="ae_level" min="-2" max="2" value="0" class="default-action">
-<div class="range-max">2</div>
+<div style="display:flex;gap:4px;align-items:center;flex:1">
+<span class="range-min">-2</span>
+<input type="range" id="ae_level" min="-2" max="2" value="0" class="default-action" style="flex:1">
+<span class="range-max">2</span>
 </div>
-<div class="input-group" id="aec_value-group">
-<label for="aec_value">Exposure</label>
-<div class="range-min">0</div>
-<input type="range" id="aec_value" min="0" max="1200" value="300" class="default-action">
-<div class="range-max">1200</div>
-</div>
-<div class="input-group" id="agc-group">
-<label for="agc">AGC</label>
-<div class="switch">
-<input id="agc" type="checkbox" class="default-action" checked="checked">
-<label class="slider" for="agc"></label>
-</div>
-</div>
-<div class="input-group hidden" id="agc_gain-group">
-<label for="agc_gain">Gain</label>
-<div class="range-min">1x</div>
-<input type="range" id="agc_gain" min="0" max="30" value="5" class="default-action">
-<div class="range-max">31x</div>
-</div>
-<div class="input-group" id="gainceiling-group">
-<label for="gainceiling">Gain Ceiling</label>
-<div class="range-min">2x</div>
-<input type="range" id="gainceiling" min="0" max="6" value="0" class="default-action">
-<div class="range-max">128x</div>
 </div>
 <div class="input-group" id="bpc-group">
 <label for="bpc">BPC</label>
@@ -930,22 +1014,8 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <label class="slider" for="lenc"></label>
 </div>
 </div>
-<div class="input-group" id="hmirror-group">
-<label for="hmirror">H-Mirror</label>
-<div class="switch">
-<input id="hmirror" type="checkbox" class="default-action">
-<label class="slider" for="hmirror"></label>
-</div>
-</div>
-<div class="input-group" id="vflip-group">
-<label for="vflip">V-Flip</label>
-<div class="switch">
-<input id="vflip" type="checkbox" class="default-action">
-<label class="slider" for="vflip"></label>
-</div>
-</div>
 <div class="input-group" id="dcw-group">
-<label for="dcw">DCW (Downsize EN)</label>
+<label for="dcw">DCW</label>
 <div class="switch">
 <input id="dcw" type="checkbox" class="default-action" checked="checked">
 <label class="slider" for="dcw"></label>
@@ -958,39 +1028,25 @@ select{border:1px solid var(--border);font-size:14px;height:22px;outline:0;borde
 <label class="slider" for="colorbar"></label>
 </div>
 </div>
-<div class="input-group" id="presets-group">
-<label>Presets</label>
-<div>
-    <button id="preset-smooth" class="btn secondary">Smooth</button>
-    <button id="preset-balanced" class="btn secondary">Balanced</button>
-    <button id="preset-detail" class="btn secondary">Detail</button>
-</div>
-</div>
 </nav>
 </div>
-<figure>
-<div id="stream-container" class="image-container hidden">
-<div class="close" id="close-stream">×</div>
-<img id="stream" src="">
 </div>
-</figure>
 </div>
-</section>
+</div>
+</div>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
 const baseHost=document.location.origin;
-const settings=document.getElementById('sidebar');
 const view=document.getElementById('stream');
-const viewContainer=document.getElementById('stream-container');
+const streamContainer=document.getElementById('stream-container');
 const stillButton=document.getElementById('get-still');
 const streamButton=document.getElementById('toggle-stream');
-const closeButton=document.getElementById('close-stream');
-let streamInterval=null;
-let isLoading=false;
+const rightPanel=document.getElementById('right-panel');
+const rightToggle=document.getElementById('right-toggle');
+const closePanel=document.getElementById('close-panel');
+let isStreaming=false;
 const hide=el=>el.classList.add('hidden');
 const show=el=>el.classList.remove('hidden');
-const disable=el=>{el.classList.add('disabled');el.disabled=true};
-const enable=el=>{el.classList.remove('disabled');el.disabled=false};
 const updateValue=(el,value,updateRemote)=>{
 updateRemote=updateRemote==null?true:updateRemote;
 let initialValue;
@@ -1004,20 +1060,6 @@ el.value=value;
 }
 if(updateRemote&&initialValue!==value){
 updateConfig(el);
-}else if(!updateRemote){
-if(el.id==="aec"){
-value?hide(document.getElementById('aec_value-group')):show(document.getElementById('aec_value-group'));
-}else if(el.id==="agc"){
-if(value){
-show(document.getElementById('gainceiling-group'));
-hide(document.getElementById('agc_gain-group'));
-}else{
-hide(document.getElementById('gainceiling-group'));
-show(document.getElementById('agc_gain-group'));
-}
-}else if(el.id==="awb_gain"){
-value?show(document.getElementById('wb_mode-group')):hide(document.getElementById('wb_mode-group'));
-}
 }
 };
 function updateConfig(el){
@@ -1030,65 +1072,49 @@ default:return;
 }
 const query=`${baseHost}/control?var=${el.id}&val=${value}`;
 fetch(query).then(response=>{
-console.log(`request to ${query} finished, status: ${response.status}`);
+console.log(`Control updated: ${el.id}=${value}`);
 });
 }
-document.querySelectorAll('.close').forEach(el=>{
-el.onclick=()=>hide(el.parentNode);
-});
-fetch(`${baseHost}/status`).then(function(response){
-return response.json();
-}).then(function(state){
+// Mobile panel toggle
+rightToggle.onclick=()=>rightPanel.classList.toggle('mobile-visible');
+closePanel.onclick=()=>rightPanel.classList.remove('mobile-visible');
+// Load initial settings
+fetch(`${baseHost}/status`).then(response=>response.json()).then(state=>{
 document.querySelectorAll('.default-action').forEach(el=>{
 updateValue(el,state[el.id],false);
 });
 if(state.motion_enabled!==undefined){
 document.getElementById('motion_enabled').checked=state.motion_enabled;
 }
-show(settings);
 });
+// Stream controls
 const stopStream=()=>{
 view.src='';
-streamButton.innerHTML='Start Stream';
-hide(viewContainer);
+streamButton.textContent='Start Stream';
+isStreaming=false;
 };
 const startStream=()=>{
 view.src=`${baseHost}/stream`;
-show(viewContainer);
-streamButton.innerHTML='Stop Stream';
+streamButton.textContent='Stop Stream';
+isStreaming=true;
 };
 stillButton.onclick=()=>{
 stopStream();
 view.src=`${baseHost}/capture?_cb=${Date.now()}`;
-show(viewContainer);
-};
-closeButton.onclick=()=>{
-stopStream();
-hide(viewContainer);
 };
 streamButton.onclick=()=>{
-const streamEnabled=streamButton.innerHTML==='Stop Stream';
-if(streamEnabled){
-stopStream();
-}else{
-startStream();
-}
+isStreaming?stopStream():startStream();
 };
+// Control listeners
 document.querySelectorAll('.default-action').forEach(el=>{
 el.onchange=()=>updateConfig(el);
 });
+// Conditional visibility
 const agc=document.getElementById('agc');
-const agcGain=document.getElementById('agc_gain-group');
 const gainCeiling=document.getElementById('gainceiling-group');
 agc.onchange=()=>{
 updateConfig(agc);
-if(agc.checked){
-show(gainCeiling);
-hide(agcGain);
-}else{
-hide(gainCeiling);
-show(agcGain);
-}
+agc.checked?show(gainCeiling):hide(gainCeiling);
 };
 const aec=document.getElementById('aec');
 const exposure=document.getElementById('aec_value-group');
@@ -1096,48 +1122,44 @@ aec.onchange=()=>{
 updateConfig(aec);
 aec.checked?hide(exposure):show(exposure);
 };
-const awb=document.getElementById('awb_gain');
-const wb=document.getElementById('wb_mode-group');
-awb.onchange=()=>{
-updateConfig(awb);
-awb.checked?show(wb):hide(wb);
+const awbGain=document.getElementById('awb_gain');
+const wbMode=document.getElementById('wb_mode-group');
+awbGain.onchange=()=>{
+updateConfig(awbGain);
+awbGain.checked?show(wbMode):hide(wbMode);
 };
-
-// Motion detection toggle
+// Motion toggle
 const motionToggle=document.getElementById('motion_enabled');
 motionToggle.onchange=()=>{
 const enabled=motionToggle.checked?1:0;
-fetch(`${baseHost}/motion-control?enabled=${enabled}`).then(response=>response.json()).then(data=>{
-console.log('Motion detection:',data.motion_enabled?'enabled':'disabled');
-}).catch(err=>console.error('Motion control failed:',err));
+fetch(`${baseHost}/motion-control?enabled=${enabled}`).then(response=>response.json()).catch(err=>console.error('Motion control failed:',err));
 };
-
-// Preset helpers
+// Presets
 const setAndPush=(id,val)=>{
-    const el=document.getElementById(id);
-    if(!el) return;
-    updateValue(el,val,true);
+const el=document.getElementById(id);
+if(!el) return;
+updateValue(el,val,true);
 };
 document.getElementById('preset-smooth').onclick=()=>{
-    setAndPush('framesize','5'); // QVGA
-    setAndPush('quality','12');
-    setAndPush('aec','1');
-    setAndPush('aec_value','200');
-    setAndPush('gainceiling','1');
+setAndPush('framesize','5');
+setAndPush('quality','12');
+setAndPush('aec','1');
+setAndPush('aec_value','200');
+setAndPush('gainceiling','1');
 };
 document.getElementById('preset-balanced').onclick=()=>{
-    setAndPush('framesize','7'); // HVGA
-    setAndPush('quality','12');
-    setAndPush('aec','1');
-    setAndPush('aec_value','250');
-    setAndPush('gainceiling','2');
+setAndPush('framesize','8');
+setAndPush('quality','8');
+setAndPush('aec','1');
+setAndPush('aec_value','300');
+setAndPush('gainceiling','2');
 };
 document.getElementById('preset-detail').onclick=()=>{
-    setAndPush('framesize','9'); // SVGA
-    setAndPush('quality','15');
-    setAndPush('aec','1');
-    setAndPush('aec_value','250');
-    setAndPush('gainceiling','2');
+setAndPush('framesize','9');
+setAndPush('quality','5');
+setAndPush('aec','1');
+setAndPush('aec_value','300');
+setAndPush('gainceiling','3');
 };
 });
 </script>
