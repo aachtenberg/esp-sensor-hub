@@ -34,6 +34,9 @@
 // Status LED (if available)
 #define STATUS_LED_PIN 2
 
+// Flash LED for debugging (GPIO 4 - ESP32-CAM flash)
+#define FLASH_LED_PIN 4
+
 // PIR Motion Sensor (AM312)
 #if defined(CAMERA_MODEL_ESP32S3_EYE)
   #define PIR_PIN 14  // GPIO14 for ESP32-S3

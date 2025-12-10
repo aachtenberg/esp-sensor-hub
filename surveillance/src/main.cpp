@@ -129,6 +129,11 @@ void setup() {
     Serial.printf("[SETUP] PIR sensor initialized on GPIO%d (motion detection %s)\n", 
                   PIR_PIN, motionEnabled ? "enabled" : "disabled");
 
+    // Setup flash LED for debugging
+    pinMode(FLASH_LED_PIN, OUTPUT);
+    digitalWrite(FLASH_LED_PIN, LOW);
+    Serial.printf("[SETUP] Flash LED initialized on GPIO%d for debugging\n", FLASH_LED_PIN);
+
     // Disable WiFi power saving for consistent streaming performance
     WiFi.setSleep(false);
 
@@ -331,6 +336,15 @@ void handleMotionDetection() {
     
     lastMotionTime = currentMillis;
     motionDetectCount++;
+
+    // Flash LED to indicate motion detected
+    digitalWrite(FLASH_LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(FLASH_LED_PIN, LOW);
+    delay(100);
+    digitalWrite(FLASH_LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(FLASH_LED_PIN, LOW);
     
     Serial.printf("[MOTION] Detected! Count: %lu\n", motionDetectCount);
     
