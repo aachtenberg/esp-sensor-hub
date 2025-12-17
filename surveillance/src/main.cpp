@@ -16,6 +16,7 @@
 #include "camera_config.h"
 #include "device_config.h"
 #include "secrets.h"
+#include "trace.h"
 
 // RTC memory for reset detection and crash loop recovery
 // These survive software resets but are cleared on power loss
@@ -136,6 +137,9 @@ void setup() {
     Serial.begin(115200);
     SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
     delay(2000);  // Extra delay to stabilize serial
+
+    // Initialize trace instrumentation
+    Trace::init();
 
     Serial.println("\n\n");
     Serial.println("========================================");
@@ -2315,6 +2319,9 @@ void publishMetricsToMQTT() {
     JsonDocument doc;
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
+    doc["trace_id"] = Trace::getTraceId();
+    doc["seq_num"] = Trace::getSequenceNumber();
+    doc["schema_version"] = 1;
     doc["location"] = "surveillance";
     doc["timestamp"] = millis() / 1000;
     doc["uptime"] = millis() / 1000;
@@ -2343,6 +2350,9 @@ void logEventToMQTT(const char* event, const char* severity) {
     JsonDocument doc;
     doc["device"] = deviceName;
     doc["chip_id"] = deviceChipId;
+    doc["trace_id"] = Trace::getTraceId();
+    doc["seq_num"] = Trace::getSequenceNumber();
+    doc["schema_version"] = 1;
     doc["location"] = "surveillance";
     doc["timestamp"] = millis() / 1000;
     doc["event"] = event;

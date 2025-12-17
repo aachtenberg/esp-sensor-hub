@@ -28,6 +28,7 @@
 #endif
 #include "secrets.h"
 #include "device_config.h"
+#include "trace.h"
 #include "display.h"
 
 // Double Reset Detector configuration
@@ -279,6 +280,9 @@ void publishEvent(const String& eventType, const String& message, const String& 
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
+  doc["trace_id"] = Trace::getTraceId();
+  doc["seq_num"] = Trace::getSequenceNumber();
+  doc["schema_version"] = 1;
   doc["event"] = eventType;
   doc["severity"] = severity;
   doc["timestamp"] = millis() / 1000;
@@ -304,6 +308,9 @@ void publishTemperature() {
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
+  doc["trace_id"] = Trace::getTraceId();
+  doc["seq_num"] = Trace::getSequenceNumber();
+  doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
   doc["celsius"] = temperatureC.toFloat();
   doc["fahrenheit"] = temperatureF.toFloat();
@@ -328,6 +335,9 @@ void publishStatus() {
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
+  doc["trace_id"] = Trace::getTraceId();
+  doc["seq_num"] = Trace::getSequenceNumber();
+  doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
   doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
   doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
@@ -541,6 +551,9 @@ void setupWiFi() {
 void setup() {
   // Initialize metrics
   metrics.bootTime = millis();
+
+  // Initialize trace instrumentation
+  Trace::init();
 
   // Serial port for debugging
   Serial.begin(115200);
