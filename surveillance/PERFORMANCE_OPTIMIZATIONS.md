@@ -74,7 +74,7 @@ config.fb_location = CAMERA_FB_IN_DRAM;  // No PSRAM available
 ## How to Rebuild
 
 ```bash
-cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/surveillance
+cd ~/PlatformIO/esp12f_ds18b20_temp_sensor/surveillance
 pio run --target clean
 pio run --target upload
 ```

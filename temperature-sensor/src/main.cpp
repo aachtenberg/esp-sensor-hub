@@ -173,7 +173,6 @@ void updateTemperatures() {
   if (tC == DEVICE_DISCONNECTED_C) {
     temperatureC = "--";
     temperatureF = "--";
-    Serial.println("DS18B20 read failed");
     metrics.sensorReadFailures++;
     publishEvent("sensor_error", "DS18B20 read failed", "error");
   } else {
@@ -183,8 +182,6 @@ void updateTemperatures() {
     float tF = sensors.toFahrenheit(tC);
     dtostrf(tF, 0, 2, buf);
     temperatureF = String(buf);
-    Serial.println("Temperature C: " + temperatureC);
-    Serial.println("Temperature F: " + temperatureF);
     metrics.updateTemperature(tC);
   }
 }
@@ -237,7 +234,14 @@ bool ensureMqttConnected() {
   Serial.print("[MQTT] Client ID: ");
   Serial.println(clientId);
   
-  bool connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD);
+  // Connect anonymously if no credentials provided, otherwise use authentication
+  bool connected;
+  if (strlen(MQTT_USER) == 0) {
+    connected = mqttClient.connect(clientId.c_str());
+  } else {
+    connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD);
+  }
+  
   if (connected) {
     Serial.println("[MQTT] Connected to broker successfully");
   } else {
@@ -250,28 +254,17 @@ bool ensureMqttConnected() {
 
 bool publishJson(const String& topic, JsonDocument& doc, bool retain = false) {
   if (!ensureMqttConnected()) {
-    Serial.print("[MQTT] Not connected, skipping publish to ");
-    Serial.println(topic);
     return false;
   }
 
   String payload;
   serializeJson(doc, payload);
-
-  Serial.print("[MQTT] Publishing to ");
-  Serial.print(topic);
-  Serial.print(" (retain=");
-  Serial.print(retain ? "true" : "false");
-  Serial.print(") payload: ");
-  Serial.println(payload);
   
   bool ok = mqttClient.publish(topic.c_str(), payload.c_str(), retain);
-  if (ok) {
-    Serial.println("[MQTT] Publish successful");
-    metrics.lastSuccessfulMqttPublish = millis();
-  } else {
-    Serial.println("[MQTT] Publish failed");
+  if (!ok) {
     metrics.mqttPublishFailures++;
+  } else {
+    metrics.lastSuccessfulMqttPublish = millis();
   }
   return ok;
 }
@@ -297,14 +290,8 @@ void publishEvent(const String& eventType, const String& message, const String& 
 
 void publishTemperature() {
   if (!isValidTemperature(temperatureC)) {
-    Serial.println("[TEMP] Invalid temperature reading, skipping publish");
     return;
   }
-
-  Serial.print("[TEMP] Building temperature payload: C=");
-  Serial.print(temperatureC);
-  Serial.print(" F=");
-  Serial.println(temperatureF);
   
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
@@ -320,20 +307,6 @@ void publishTemperature() {
 }
 
 void publishStatus() {
-  Serial.println("[STATUS] Building status payload");
-  Serial.print("  WiFi: ");
-  Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("  SSID: ");
-    Serial.print(WiFi.SSID());
-    Serial.print(" RSSI: ");
-    Serial.println(WiFi.RSSI());
-  }
-  Serial.print("  Free heap: ");
-  Serial.println(ESP.getFreeHeap());
-  Serial.print("  Uptime: ");
-  Serial.println((millis() - metrics.bootTime) / 1000);
-  
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
@@ -444,14 +417,18 @@ void setupWiFi() {
 
   // Don't use timeout - keep retrying forever in weak WiFi zones
   wm.setConnectTimeout(0);
-
+  
+  // Enable WiFi power save mode (modem sleep) for low power operation
   #ifdef ESP32
-    WiFi.setSleep(false);
+    WiFi.setSleep(true);
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
   #else
-    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
   #endif
+  Serial.println("[POWER] WiFi modem sleep enabled");
+  
   WiFi.mode(WIFI_STA);
-
+  
   // Check for double reset - enter config portal if detected
   if (drd->detectDoubleReset()) {
     Serial.println();
@@ -562,6 +539,16 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // Set CPU frequency to low-power mode
+  #ifdef ESP8266
+    system_update_cpu_freq(CPU_FREQ_MHZ);
+  #else
+    setCpuFrequencyMhz(CPU_FREQ_MHZ);
+  #endif
+  Serial.print("[POWER] CPU frequency set to ");
+  Serial.print(CPU_FREQ_MHZ);
+  Serial.println(" MHz");
+
   // Print reset reason for diagnostics
   #ifdef ESP8266
     Serial.print("[DEBUG] Reset reason: ");
@@ -583,6 +570,8 @@ void setup() {
   updateTopicBase();
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setBufferSize(1024);
+  mqttClient.setKeepAlive(60);
+  mqttClient.setSocketTimeout(30);
 
   // Start up the DS18B20 library
   sensors.begin();
@@ -594,8 +583,12 @@ void setup() {
   // Connect to WiFi
   setupWiFi();
 
-  // Setup web server
-  setupWebServer();
+  // Setup web server (only if enabled)
+  #if HTTP_SERVER_ENABLED
+    setupWebServer();
+  #else
+    Serial.println("[HTTP] Web server disabled (battery mode)");
+  #endif
 
       // Log device boot/reset event
       String resetReason;
