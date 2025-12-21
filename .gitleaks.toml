@@ -1,0 +1,38 @@
+# Gitleaks configuration
+# Detects and prevents secrets from being committed
+
+# Redact sensitive values in output
+redact = true
+
+# Enable verbose output
+verbose = true
+
+# Scan the git history (not just working directory)
+scan-untracked = true
+
+# Use default rules
+useDefault = true
+
+[allowlist]
+# Files to ignore during scanning
+files = [
+  "(?i).*\\.lock",
+  "(?i).*node_modules.*",
+  "(?i).*build.*",
+  "(?i).*dist.*"
+]
+
+# Regexes to allow (whitelisted patterns)
+regexes = [
+  "your_.*",  # Placeholder values in examples
+  "example.*",
+  "placeholder.*"
+]
+
+# Commit/path allowlist
+commits = []
+paths = [
+  "(?i).*\\.github/workflows.*",
+  "(?i).*docs/.*",
+  "(?i).*comprehensive-web-server-plan\\.txt"
+]
