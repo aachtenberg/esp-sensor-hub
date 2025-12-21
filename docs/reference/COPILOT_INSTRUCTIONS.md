@@ -29,6 +29,8 @@
 - Ignore platform-specific instructions in documentation
 - Create new patterns when existing patterns should be followed
 - Skip reading memory-bank context files
+- **Copy secrets.h.example to secrets.h without checking if secrets.h already exists**
+- **Overwrite existing secrets with example values**
 
 ### ✅ DO:
 - Read documentation thoroughly before suggesting changes
@@ -36,6 +38,9 @@
 - Check memory-bank for recent decisions and context
 - Ask clarifying questions if documentation is unclear
 - Reference specific documentation sections in your responses
+- **Always check if `secrets.h` exists before suggesting to copy from `secrets.h.example`**
+- **Preserve existing secrets.h values when updating credentials**
+- **Only use `secrets.h.example` as a template for new projects or missing files**
 
 ---
 
@@ -154,13 +159,6 @@
 - [ ] No outdated architecture references (CloudWatch, AWS, etc.)
 - [ ] All WiFiManager portal and InfluxDB architecture is current
 - [ ] Quick start commands in README match detailed commands in CONFIG.md
-
-## Cross-Build Feature Parity (Surveillance Camera)
-
-- **Source of truth**: Arduino CLI sketch (surveillance-arduino/ESP32CAM_Surveillance) is canonical for shared camera features.
-- **PlatformIO sync**: Mirror common features into surveillance/ (PlatformIO) when they diverge (SD handling, motion storage, web/MQTT endpoints).
-- **Check before edits**: Diff Arduino vs PlatformIO for SD mount order, motion-to-SD saves, MQTT payload fields, and reset/fallback behavior.
-- **Document parity fixes**: When aligning builds, update README or CONFIG only if user-facing commands or behaviors change.
 
 ---
 
