@@ -2,6 +2,42 @@
 // Arduino IDE version - converted from PlatformIO
 // Remove the first #include <Arduino.h> - not needed in Arduino IDE
 
+// ============================================================================
+// BOARD SELECTION
+// ============================================================================
+// This sketch supports multiple ESP32 boards. The board is detected via macros:
+//
+// 1. FREENOVE ESP32-S3 WROOM (RECOMMENDED - Primary board)
+//    - Compile: ./COMPILE_ESP32S3.sh
+//    - Features: OV3660 camera, 8MB PSRAM, SD card support (1-bit mode)
+//    - Pins: SD_MMC on CLK=39, CMD=38, D0=40
+//    - Status: FULLY SUPPORTED & TESTED
+//
+// 2. AI THINKER ESP32-CAM (Legacy support)
+//    - Compile: ./bin/arduino-cli compile --fqbn esp32:esp32:esp32cam ESP32CAM_Surveillance
+//    - Features: OV2640 camera, no PSRAM, SD card support (2-bit mode)
+//    - Status: Code compatible (pin defs conditional)
+//
+// 3. ESP32 DEVKIT (Testing without camera)
+//    - Compile: ./bin/arduino-cli compile --fqbn esp32:esp32:esp32 ESP32CAM_Surveillance
+//    - Features: WiFi, MQTT, web server (no camera/SD)
+//    - Status: Code compatible
+//
+// NOTE: Arduino CLI does NOT automatically define ARDUINO_FREENOVE_ESP32_S3_WROOM
+// even when using --fqbn esp32:esp32:esp32s3. We force-define it here to ensure
+// the correct board paths are taken. This is removed/unused for ESP32-CAM.
+// ============================================================================
+
+// Force-define for Freenove ESP32-S3 when compiling with Arduino CLI
+// (Arduino IDE and PlatformIO may define this automatically, but Arduino CLI doesn't)
+#define ARDUINO_FREENOVE_ESP32_S3_WROOM 1
+
+// SD_MMC pin definitions for ESP32-S3 (Freenove WROOM)
+// Only used when ARDUINO_FREENOVE_ESP32_S3_WROOM is defined
+#define SD_MMC_CMD 38
+#define SD_MMC_CLK 39
+#define SD_MMC_D0  40
+
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
@@ -26,13 +62,6 @@ RTC_NOINIT_ATTR uint32_t rtcResetCount;      // Counts rapid resets
 RTC_NOINIT_ATTR uint32_t rtcResetTimestamp;  // Timestamp of last reset
 RTC_NOINIT_ATTR uint32_t rtcCrashLoopFlag;   // Magic number if boot incomplete
 RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
-
-// SD_MMC pin definitions for ESP32-S3 only (not for ESP32-CAM)
-#ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
-#define SD_MMC_CMD 38 //Please do not modify it.
-#define SD_MMC_CLK 39 //Please do not modify it. 
-#define SD_MMC_D0  40 //Please do not modify it.
-#endif
 
 // Boot/recovery state
 const char* configPortalReason = "none";     // Why portal was triggered
@@ -203,6 +232,9 @@ void setup() {
     // Setup WiFi
     setupWiFi();
 
+    // Initialize SD card FIRST (before camera)
+    setupSD();
+
     // Initialize camera in background (non-blocking)
     // Camera will be initialized asynchronously, web server will respond with camera_ready=false until done
     xTaskCreate(
@@ -215,10 +247,6 @@ void setup() {
             } else {
                 Serial.println("[Camera] Initialization complete!");
                 Serial.printf("[Camera] cameraReady = %d\n", cameraReady);
-                
-                // Mount SD card AFTER camera init (like Arduino sketch)
-                Serial.println("[SD] Mounting SD card after camera init...");
-                setupSD();
             }
             vTaskDelete(NULL);
         },
@@ -608,28 +636,31 @@ void setupSD() {
     
     // Use different SD_MMC initialization based on board
     #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
-    // ESP32-S3: requires full parameters with 4-bit mode
+    // ESP32-S3: Configure pins and begin with 5 parameters
+    Serial.println("[SD] Using ESP32-S3 WROOM configuration (5-parameter mode)");
+    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
     if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
       Serial.println("[SD] Card Mount Failed");
+      sdReady = false;
       return;
     }
     #else
-    // ESP32-CAM: use 1-bit mode with mountpoint like working Arduino sketch
-    // Note: "/sdcard" mountpoint, true = 1-bit mode (critical for ESP32-CAM)
+    // ESP32-CAM: use 1-bit mode with 2 parameters
     if (!SD_MMC.begin("/sdcard", true)) {
-      Serial.println("[SD] Card Mount Failed");
+      Serial.println("[SD] Card Mount Failed - ESP32-CAM mode");
+      sdReady = false;
       return;
     }
     #endif
     
     uint8_t cardType = SD_MMC.cardType();
-    if (cardType == CARD_NONE) {
-        Serial.println("[SD] No SD card attached");
+    if(cardType == CARD_NONE){
+        Serial.println("[SD] No SD_MMC card attached");
         sdReady = false;
         return;
     }
-    Serial.print("SD_MMC Card Type: ");
     
+    Serial.print("[SD] Card Type: ");
     if(cardType == CARD_MMC){
         Serial.println("MMC");
     } else if(cardType == CARD_SD){
@@ -639,12 +670,14 @@ void setupSD() {
     } else {
         Serial.println("UNKNOWN");
     }
-
+    
     sdReady = true;
     uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-    Serial.printf("[SD] Card mounted successfully: %llu MB, Type: %d\n", cardSize, cardType);
+    Serial.printf("[SD] Card Size: %lluMB\n", cardSize);
+    Serial.printf("[SD] Total space: %lluMB\r\n", SD_MMC.totalBytes() / (1024 * 1024));
+    Serial.printf("[SD] Used space: %lluMB\r\n", SD_MMC.usedBytes() / (1024 * 1024));
     
-    // Create capture directory - mkdir returns 0 if already exists (like Arduino sketch)
+    // Create capture directory
     fs::FS &fs = SD_MMC;
     int dirResult = fs.mkdir(SD_CAPTURE_DIR);
     if (dirResult) {

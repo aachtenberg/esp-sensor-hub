@@ -15,8 +15,6 @@
 #include <driver/sdmmc_host.h>
 #include <sdmmc_cmd.h>
 #include <img_converters.h>
-#include <vector>
-#include <algorithm>
 #include "camera_config.h"
 #include "device_config.h"
 #include "secrets.h"
@@ -29,8 +27,8 @@ RTC_NOINIT_ATTR uint32_t rtcResetTimestamp;  // Timestamp of last reset
 RTC_NOINIT_ATTR uint32_t rtcCrashLoopFlag;   // Magic number if boot incomplete
 RTC_NOINIT_ATTR uint32_t rtcCrashCount;      // Consecutive crash count
 
-// SD_MMC pin definitions for ESP32
-#if CONFIG_IDF_TARGET_ESP32S3
+// SD_MMC pin definitions for ESP32-S3 only (not for ESP32-CAM)
+#ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
 #define SD_MMC_CMD 38 //Please do not modify it.
 #define SD_MMC_CLK 39 //Please do not modify it. 
 #define SD_MMC_D0  40 //Please do not modify it.
@@ -108,7 +106,6 @@ void IRAM_ATTR motionISR();
 bool checkCameraMotion();
 void setupWiFi();
 void setupSD();
-bool deleteOldestCaptures(int count);
 bool deleteAllCaptures();
 void setupCamera();
 void setupMQTT();
@@ -144,19 +141,17 @@ void checkWiFiFallback();
 
 void setup() {
     Serial.begin(115200);
+
     // Check reset counter and crash loop FIRST (before anything else and any delays)
     checkResetCounter();
 
-    // Configure SD_MMC pins only on ESP32-S3
-    #if CONFIG_IDF_TARGET_ESP32S3
+    // Configure SD_MMC pins (ESP32-S3 only)
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
     SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
     #endif
-
+    
     // Initialize trace instrumentation (keep early, but after reset check)
     Trace::init();
-
-    // Extra delay to stabilize serial
-    delay(2000);
 
     Serial.println("\n\n");
     Serial.println("========================================");
@@ -197,6 +192,9 @@ void setup() {
         Serial.println("[SETUP] No flash LED available on this board");
     }
 
+    // Mount SD card (1-bit mode for ESP32-CAM) for capture storage
+    setupSD();
+
     // Disable WiFi power saving for consistent streaming performance
     WiFi.setSleep(false);
 
@@ -221,8 +219,6 @@ void setup() {
             } else {
                 Serial.println("[Camera] Initialization complete!");
                 Serial.printf("[Camera] cameraReady = %d\n", cameraReady);
-                Serial.println("[SD] Mounting SD card after camera init...");
-                setupSD();
             }
             vTaskDelete(NULL);
         },
@@ -236,8 +232,8 @@ void setup() {
     // Setup MQTT
     setupMQTT();
 
-    // Setup OTA updates
-    setupOTA();
+    // Setup OTA updates (disabled)
+    // setupOTA();
 
     // Setup Web Server
     setupWebServer();
@@ -260,8 +256,8 @@ void setup() {
 void loop() {
     unsigned long currentMillis = millis();
 
-    // Handle OTA updates
-    ArduinoOTA.handle();
+    // Handle OTA updates (disabled)
+    // ArduinoOTA.handle();
 
     // Check for WiFi fallback AP mode
     checkWiFiFallback();
@@ -306,16 +302,6 @@ void loop() {
     if (motionEnabled && cameraReady) {
         if (currentMillis - lastMotionCheck >= MOTION_CHECK_INTERVAL) {
             if (checkCameraMotion()) {
-                // Save motion capture to SD (best-effort)
-                bool sdSaved = false;
-                if (sdReady) {
-                    camera_fb_t* fb = capturePhoto();
-                    if (fb) {
-                        sdSaved = saveImageToSD(fb, "motion");
-                        returnFrameBuffer(fb);
-                    }
-                }
-
                 // Motion detected - publish to MQTT
                 if (mqttConnected) {
                     JsonDocument doc;
@@ -323,7 +309,6 @@ void loop() {
                     doc["motion"] = true;
                     doc["timestamp"] = currentMillis / 1000;
                     doc["count"] = motionDetectCount;
-                    doc["sd_saved"] = sdSaved;
 
                     String output;
                     serializeJson(doc, output);
@@ -619,14 +604,35 @@ void gracefulSDShutdown() {
 void setupSD() {
     Serial.println("[SD] Mounting SD card...");
     
-    // Attempt to mount SD card with 1-bit mode
-    #if CONFIG_IDF_TARGET_ESP32S3
-    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    // ESP32-CAM: Reduce CPU frequency for stable SD_MMC operations
+    #ifndef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    setCpuFrequencyMhz(160);  // Reduce from 240MHz to 160MHz for SD stability
+    Serial.println("[SD] CPU frequency reduced to 160MHz for SD_MMC stability");
     #endif
-    if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
-        Serial.println("[SD] Card Mount Failed");
-        return;
+    
+    // Configure SD_MMC pins FIRST (critical for ESP32-S3)
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    Serial.println("[SD] Configuring pins for ESP32-S3...");
+    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    Serial.printf("[SD] Pins set: CLK=%d CMD=%d D0=%d\n", SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    #endif
+    
+    // Use different SD_MMC initialization based on board
+    #ifdef ARDUINO_FREENOVE_ESP32_S3_WROOM
+    // ESP32-S3: use 1-bit mode with proper parameters
+    Serial.println("[SD] Calling SD_MMC.begin(\"/sdcard\", true, false, 40000000)...");
+    if (!SD_MMC.begin("/sdcard", true, false, 40000000)) {
+      Serial.println("[SD] Card Mount Failed");
+      return;
     }
+    #else
+    // ESP32-CAM: use defaults (no parameters) - matches working SDMMC_Test.ino
+    if (!SD_MMC.begin()) {
+      Serial.println("[SD] Card Mount Failed");
+      return;
+    }
+    #endif
+    Serial.println("[SD] SD_MMC.begin() returned success");
     
     uint8_t cardType = SD_MMC.cardType();
     if (cardType == CARD_NONE) {
@@ -650,13 +656,13 @@ void setupSD() {
     uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
     Serial.printf("[SD] Card mounted successfully: %llu MB, Type: %d\n", cardSize, cardType);
     
-    // Create capture directory - mkdir returns 0 if already exists
-    fs::FS &fs = SD_MMC;
-    int dirResult = fs.mkdir(SD_CAPTURE_DIR);
-    if (dirResult) {
-        Serial.printf("[SD] Created capture directory: %s\n", SD_CAPTURE_DIR);
-    } else {
-        Serial.printf("[SD] Capture directory ready: %s\n", SD_CAPTURE_DIR);
+    // Ensure capture directory exists
+    if (!SD_MMC.exists(SD_CAPTURE_DIR)) {
+        if (SD_MMC.mkdir(SD_CAPTURE_DIR)) {
+            Serial.printf("[SD] Created capture directory: %s\n", SD_CAPTURE_DIR);
+        } else {
+            Serial.println("[SD] Failed to create capture directory");
+        }
     }
 }
 
@@ -665,28 +671,10 @@ bool saveImageToSD(camera_fb_t* fb, const char* reason) {
         return false;
     }
     
-    // Check available space (keep at least 10MB free)
-    uint64_t totalBytes = SD_MMC.totalBytes();
-    uint64_t usedBytes = SD_MMC.usedBytes();
-    uint64_t freeBytes = totalBytes - usedBytes;
-    uint64_t freeMB = freeBytes / (1024 * 1024);
-
-    if (freeMB < 10) {
-        Serial.printf("[SD] Low space: %llu MB free - attempting cleanup\n", freeMB);
-        deleteOldestCaptures(5);  // Delete 5 oldest files
-        // Recheck space
-        freeBytes = SD_MMC.totalBytes() - SD_MMC.usedBytes();
-        freeMB = freeBytes / (1024 * 1024);
-        if (freeMB < 5) {
-            Serial.printf("[SD] Still low space after cleanup: %llu MB\n", freeMB);
-            return false;
-        }
-    }
-
     char path[80];
     snprintf(path, sizeof(path), "%s/%lu_%s.jpg", SD_CAPTURE_DIR, millis(), reason);
-
-    File file = SD_MMC.open(path, FILE_WRITE);
+    
+    File file = SD_MMC.open(path, "w");
     if (!file) {
         Serial.println("[SD] Failed to open file for writing");
         return false;
@@ -702,59 +690,6 @@ bool saveImageToSD(camera_fb_t* fb, const char* reason) {
         Serial.printf("[SD] Write failed: expected %u, wrote %u\n", (unsigned int)fb->len, (unsigned int)written);
         return false;
     }
-}
-
-bool deleteOldestCaptures(int count) {
-    if (!sdReady) {
-        Serial.println("[SD] Cannot delete captures - SD not ready");
-        return false;
-    }
-
-    struct FileInfo {
-        String path;
-        time_t timestamp;
-    };
-    std::vector<FileInfo> files;
-
-    File dir = SD_MMC.open(SD_CAPTURE_DIR);
-    if (!dir || !dir.isDirectory()) {
-        Serial.println("[SD] Capture directory missing");
-        return false;
-    }
-
-    File entry = dir.openNextFile();
-    while (entry) {
-        if (!entry.isDirectory()) {
-            FileInfo info;
-            info.path = entry.path();
-            info.timestamp = entry.getLastWrite();
-            files.push_back(info);
-        }
-        entry.close();
-        entry = dir.openNextFile();
-    }
-    dir.close();
-
-    if (files.empty()) {
-        Serial.println("[SD] No captures to delete");
-        return true;
-    }
-
-    std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
-        return a.timestamp < b.timestamp;
-    });
-
-    int toDelete = std::min(count, (int)files.size());
-    int deleted = 0;
-    for (int i = 0; i < toDelete; i++) {
-        if (SD_MMC.remove(files[i].path)) {
-            deleted++;
-            Serial.printf("[SD] Deleted old capture: %s\n", files[i].path.c_str());
-        }
-    }
-
-    Serial.printf("[SD] Deleted %d oldest captures\n", deleted);
-    return deleted > 0;
 }
 
 bool deleteAllCaptures() {
