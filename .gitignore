@@ -10,6 +10,7 @@ include/secrets.h
 *.crt
 .env
 .env.local
+DEVICE_INVENTORY.md
 
 # Python
 .venv
