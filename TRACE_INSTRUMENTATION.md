@@ -309,7 +309,7 @@ To add new fields in future:
    - Check seq_num resets to 0 after device restart
 
 3. **Verify payload size remains within MQTT limits:**
-   - Maximum payload: 1024 bytes (configured)
+   - Maximum payload: 2048 bytes (ESP32) / 1024 bytes (ESP8266) (configured)
    - Trace fields add ~70 bytes overhead
    - Remaining space: ~950 bytes for other data
 

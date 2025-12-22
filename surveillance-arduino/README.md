@@ -35,7 +35,7 @@ Edit [ESP32CAM_Surveillance/secrets.h](ESP32CAM_Surveillance/secrets.h):
 ```cpp
 #define WIFI_SSID "YourWiFi"
 #define WIFI_PASSWORD "YourPassword"
-#define MQTT_SERVER "192.168.1.100"
+#define MQTT_SERVER "YOUR_MQTT_BROKER_IP"
 #define MQTT_USER "username"
 #define MQTT_PASSWORD "password"
 ```

@@ -17,6 +17,7 @@
 
 #include <WiFiManager.h>
 #include <ESP_DoubleResetDetector.h>
+#include <ArduinoOTA.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
@@ -30,6 +31,7 @@
 #include "device_config.h"
 #include "trace.h"
 #include "display.h"
+#include "version.h"
 
 // Double Reset Detector configuration
 #define DRD_TIMEOUT 3           // Seconds to wait for second reset
@@ -51,11 +53,14 @@ struct DeviceMetrics {
     float minTempC;
     float maxTempC;
     unsigned long lastSuccessfulMqttPublish;
+  float batteryVoltage;
+  int batteryPercent;
 
     DeviceMetrics() : bootTime(0), wifiReconnects(0), sensorReadFailures(0),
                       mqttPublishFailures(0),
                       minTempC(999.0f), maxTempC(-999.0f),
-                      lastSuccessfulMqttPublish(0) {}
+            lastSuccessfulMqttPublish(0),
+            batteryVoltage(0.0f), batteryPercent(-1) {}
 
     void updateTemperature(float tempC) {
         if (tempC > -100.0f && tempC < 100.0f) {
@@ -93,15 +98,28 @@ PubSubClient mqttClient(espClient);
 String chipId;
 String topicBase;
 unsigned long lastMqttReconnectAttempt = 0;
+unsigned long lastMqttConnectionCheck = 0;  // Track when we last checked MQTT status
 unsigned long lastPublishTime = 0;
+unsigned long lastSuccessfulMqttCheck = 0;
+unsigned long mqttReconnectInterval = 5000;  // Dynamic backoff interval
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
+const unsigned long MQTT_RECONNECT_INTERVAL_MAX_MS = 60000;  // Max 60s backoff
+const unsigned long MQTT_CONNECTION_CHECK_INTERVAL_MS = 30000;  // Check connection health every 30s
 const unsigned long MQTT_PUBLISH_INTERVAL_MS = 30000;
+const unsigned long MQTT_STALE_CONNECTION_TIMEOUT_MS = 120000;  // Force reconnect if no activity for 2 mins
+
+// WiFi reconnection tracking
+unsigned long wifiDisconnectedSince = 0;
+const unsigned long WIFI_STALE_CONNECTION_TIMEOUT_MS = 90000;   // Full WiFi restart after 90s disconnected
+const int WIFI_MIN_RSSI = -85;  // Defer operations if signal weaker than this
 
 // Timer variables
 const unsigned long publishIntervalMs = MQTT_PUBLISH_INTERVAL_MS;
 unsigned long lastWiFiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = WIFI_CHECK_INTERVAL_MS;
 unsigned long lastDisplayUpdate = 0;
+// Periodic status logging
+unsigned long lastStatusLog = 0;
 
 // Load device name from filesystem
 void loadDeviceName() {
@@ -166,6 +184,23 @@ bool isValidTemperature(const String& temp) {
   return temp.length() > 0 && temp != "--";
 }
 
+// Read battery voltage and percentage (optional)
+void readBattery() {
+#ifdef BATTERY_MONITOR_ENABLED
+  int raw = analogRead(BATTERY_PIN);
+  float voltage = (raw / ADC_MAX) * REF_VOLTAGE * VOLTAGE_DIVIDER * CALIBRATION;
+  
+  // Convert to percentage (3.0V = 0%, 4.2V = 100%)
+  float percent = ((voltage - BATTERY_MIN_V) / (BATTERY_MAX_V - BATTERY_MIN_V)) * 100.0;
+  percent = constrain(percent, 0, 100);
+  
+  metrics.batteryVoltage = voltage;
+  metrics.batteryPercent = (int)percent;
+  
+  Serial.printf("[Battery] %.2fV, %d%%\n", voltage, (int)percent);
+#endif
+}
+
 // Update both temperature globals in one call
 void updateTemperatures() {
   sensors.requestTemperatures();
@@ -193,6 +228,57 @@ String generateChipId() {
   return mac;
 }
 
+// Setup OTA updates
+void setupOTA() {
+  // Set hostname for OTA
+  ArduinoOTA.setHostname(deviceName);
+  
+  // Set password from secrets.h
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  // Removed verbose password confirmation logging
+  
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_SPIFFS
+      type = "filesystem";
+    }
+    Serial.println("[OTA] Update started: " + type);
+    publishEvent("ota_start", "OTA update starting (" + type + ")", "warning");
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println("[OTA] Update complete");
+    publishEvent("ota_complete", "OTA update completed successfully", "info");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    static unsigned int lastPercent = 0;
+    unsigned int percent = (progress / (total / 100));
+    if (percent != lastPercent && percent % 25 == 0) {  // Changed from 10% to 25% to reduce logging
+      Serial.printf("[OTA] Progress: %u%%\n", percent);
+      lastPercent = percent;
+    }
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("[OTA] Error[%u]: ", error);
+    String errorMsg;
+    if (error == OTA_AUTH_ERROR) errorMsg = "Auth Failed";
+    else if (error == OTA_BEGIN_ERROR) errorMsg = "Begin Failed";
+    else if (error == OTA_CONNECT_ERROR) errorMsg = "Connect Failed";
+    else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
+    else if (error == OTA_END_ERROR) errorMsg = "End Failed";
+    Serial.println(errorMsg);
+    publishEvent("ota_error", "OTA update failed: " + errorMsg, "error");
+  });
+  
+  ArduinoOTA.begin();
+  Serial.println("[OTA] Ready");
+  // Removed verbose hostname logging
+}
+
 String sanitizeDeviceName(const char* name) {
   String sanitized = String(name);
   sanitized.replace(" ", "-");
@@ -216,8 +302,22 @@ String getTopicEvents() {
 }
 
 bool ensureMqttConnected() {
+  unsigned long now = millis();
+  
+  // Check for stale connection: if connected but no successful publish in 2 minutes, force reconnect
   if (mqttClient.connected()) {
-    return true;
+    if (metrics.lastSuccessfulMqttPublish > 0 && 
+        (now - metrics.lastSuccessfulMqttPublish) > MQTT_STALE_CONNECTION_TIMEOUT_MS) {
+      Serial.println("[MQTT] Stale connection detected - forcing reconnect");
+      Serial.printf("[MQTT] Last successful publish was %lu seconds ago\n", 
+                    (now - metrics.lastSuccessfulMqttPublish) / 1000);
+      mqttClient.disconnect();
+      delay(100);
+      // Fall through to reconnection logic below
+    } else {
+      lastSuccessfulMqttCheck = now;
+      return true;
+    }
   }
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -225,14 +325,15 @@ bool ensureMqttConnected() {
     return false;
   }
 
-  Serial.print("[MQTT] Attempting connection to ");
-  Serial.print(MQTT_BROKER);
-  Serial.print(":");
-  Serial.println(MQTT_PORT);
+  // Rate limit reconnection attempts (but allow first connection at startup)
+  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) <= MQTT_RECONNECT_INTERVAL_MS) {
+    return false;
+  }
+
+  lastMqttReconnectAttempt = now;
   
+  // Reduced logging - only show connection attempts on failure
   String clientId = String(deviceName) + "-" + chipId;
-  Serial.print("[MQTT] Client ID: ");
-  Serial.println(clientId);
   
   // Connect anonymously if no credentials provided, otherwise use authentication
   bool connected;
@@ -243,11 +344,15 @@ bool ensureMqttConnected() {
   }
   
   if (connected) {
-    Serial.println("[MQTT] Connected to broker successfully");
+    Serial.println("[MQTT] Connected to broker");
+    lastSuccessfulMqttCheck = now;
+    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;  // Reset backoff on success
   } else {
-    Serial.print("[MQTT] Connection failed, state: ");
-    Serial.println(mqttClient.state());
+    Serial.printf("[MQTT] Connection failed (state: %d), retry in %lu seconds\n", 
+                  mqttClient.state(), mqttReconnectInterval / 1000);
     metrics.mqttPublishFailures++;
+    // Exponential backoff: double interval up to max
+    mqttReconnectInterval = min(mqttReconnectInterval * 2, MQTT_RECONNECT_INTERVAL_MAX_MS);
   }
   return connected;
 }
@@ -273,6 +378,7 @@ void publishEvent(const String& eventType, const String& message, const String& 
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
+  doc["firmware_version"] = getFirmwareVersion();
   doc["trace_id"] = Trace::getTraceId();
   doc["traceparent"] = Trace::getTraceparent();
   doc["seq_num"] = Trace::getSequenceNumber();
@@ -298,6 +404,12 @@ void publishTemperature() {
   doc["chip_id"] = chipId;
   doc["trace_id"] = Trace::getTraceId();
   doc["traceparent"] = Trace::getTraceparent();
+  #ifdef BATTERY_MONITOR_ENABLED
+    if (metrics.batteryPercent >= 0) {
+      doc["battery_voltage"] = metrics.batteryVoltage;
+      doc["battery_percent"] = metrics.batteryPercent;
+    }
+  #endif
   doc["seq_num"] = Trace::getSequenceNumber();
   doc["schema_version"] = 1;
   doc["timestamp"] = millis() / 1000;
@@ -310,6 +422,7 @@ void publishStatus() {
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
+  doc["firmware_version"] = getFirmwareVersion();
   doc["trace_id"] = Trace::getTraceId();
   doc["traceparent"] = Trace::getTraceparent();
   doc["seq_num"] = Trace::getSequenceNumber();
@@ -322,6 +435,12 @@ void publishStatus() {
   doc["sensor_healthy"] = isValidTemperature(temperatureC);
   doc["wifi_reconnects"] = metrics.wifiReconnects;
   doc["sensor_read_failures"] = metrics.sensorReadFailures;
+  #ifdef BATTERY_MONITOR_ENABLED
+    if (metrics.batteryPercent >= 0) {
+      doc["battery_voltage"] = metrics.batteryVoltage;
+      doc["battery_percent"] = metrics.batteryPercent;
+    }
+  #endif
   publishJson(getTopicStatus(), doc, true);
 }
 
@@ -344,12 +463,20 @@ String getHealthStatus() {
   doc["status"] = "ok";
   doc["device"] = deviceName;
   doc["board"] = DEVICE_BOARD;
+  doc["firmware_version"] = getFirmwareVersion();
   doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
   doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
   doc["wifi_rssi"] = WiFi.RSSI();
   doc["temperature_valid"] = isValidTemperature(temperatureC);
   doc["current_temp_c"] = temperatureC;
   doc["current_temp_f"] = temperatureF;
+
+#ifdef BATTERY_MONITOR_ENABLED
+  if (metrics.batteryPercent >= 0) {
+    doc["battery_voltage"] = metrics.batteryVoltage;
+    doc["battery_percent"] = metrics.batteryPercent;
+  }
+#endif
 
   doc["metrics"]["wifi_reconnects"] = metrics.wifiReconnects;
   doc["metrics"]["sensor_read_failures"] = metrics.sensorReadFailures;
@@ -391,7 +518,9 @@ void handleHealth() {
 }
 
 void setupWebServer() {
+#ifndef API_ENDPOINTS_ONLY
   server.on("/", HTTP_GET, handleRoot);
+#endif
   server.on("/temperaturec", HTTP_GET, handleTemperatureC);
   server.on("/temperaturef", HTTP_GET, handleTemperatureF);
   server.on("/health", HTTP_GET, handleHealth);
@@ -428,6 +557,14 @@ void setupWiFi() {
   Serial.println("[POWER] WiFi modem sleep enabled");
   
   WiFi.mode(WIFI_STA);
+  // Enable auto-reconnect and persist credentials (low-power friendly)
+  #ifdef ESP8266
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
+  #else
+    // ESP32 also supports auto reconnect in Arduino core
+    WiFi.setAutoReconnect(true);
+  #endif
   
   // Check for double reset - enter config portal if detected
   if (drd->detectDoubleReset()) {
@@ -474,8 +611,7 @@ void setupWiFi() {
     }
   } else {
     Serial.println("[WiFi] Normal boot - attempting connection...");
-    Serial.println("[WiFi] (Double-reset within 3 seconds to enter config mode)");
-    Serial.println();
+    // Removed verbose double-reset message to reduce logging
 
     // Set save config callback for autoConnect mode
     bool shouldSaveConfig = false;
@@ -485,8 +621,8 @@ void setupWiFi() {
     });
 
     if (!wm.autoConnect(apName.c_str())) {
-      Serial.println("[WiFi] Failed to connect");
-      Serial.println("[WiFi] Running in offline mode - double-reset to configure");
+      Serial.println("[WiFi] Failed to connect - running in offline mode");
+      // Removed verbose double-reset message to reduce logging
     } else if (shouldSaveConfig) {
       // Save the device name if config was saved
       const char* newName = custom_device_name.getValue();
@@ -506,20 +642,10 @@ void setupWiFi() {
     }
   }
 
-  // Print connection status
+  // Print connection status - simplified
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("  WiFi Connected!");
-    Serial.println("========================================");
-    Serial.print("[WiFi] SSID: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("[WiFi] IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("[WiFi] Signal Strength: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    Serial.println();
+    Serial.printf("[WiFi] Connected to %s, IP: %s, RSSI: %d dBm\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
     
     // Log WiFi connection event
     publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
@@ -569,19 +695,34 @@ void setup() {
   chipId = generateChipId();
   updateTopicBase();
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-  mqttClient.setBufferSize(1024);
-  mqttClient.setKeepAlive(60);
-  mqttClient.setSocketTimeout(30);
+#ifdef ESP32
+  mqttClient.setBufferSize(2048);  // Larger buffer for ESP32 with battery monitoring
+#else
+  mqttClient.setBufferSize(1024);  // Standard buffer for ESP8266
+#endif
+  mqttClient.setKeepAlive(30);
+  mqttClient.setSocketTimeout(15);
 
   // Start up the DS18B20 library
   sensors.begin();
   updateTemperatures();
+
+  #ifdef BATTERY_MONITOR_ENABLED
+    // Configure ADC for battery monitoring
+    analogReadResolution(12);
+    readBattery();
+  #endif
 
   // Initialize OLED display
   initDisplay();
 
   // Connect to WiFi
   setupWiFi();
+
+  // Setup OTA updates (after WiFi is connected)
+  if (WiFi.status() == WL_CONNECTED) {
+    setupOTA();
+  }
 
   // Setup web server (only if enabled)
   #if HTTP_SERVER_ENABLED
@@ -623,8 +764,16 @@ void loop() {
   // Periodic WiFi check
   unsigned long now = millis();
 
-  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) > MQTT_RECONNECT_INTERVAL_MS) {
+  // MQTT connection management - check health periodically (catches stale connections)
+  if ((now - lastMqttConnectionCheck) > MQTT_CONNECTION_CHECK_INTERVAL_MS) {
+    lastMqttConnectionCheck = now;
+    ensureMqttConnected();  // This checks for stale connections even if "connected"
+  }
+  
+  // Immediate reconnect if definitely disconnected
+  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) > mqttReconnectInterval) {
     lastMqttReconnectAttempt = now;
+    Serial.println("[MQTT] Not connected, attempting reconnect...");
     ensureMqttConnected();
   }
 
@@ -633,12 +782,41 @@ void loop() {
 
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnection...");
-      WiFi.reconnect();
+      // Check if credentials exist before attempting reconnect
+      if (WiFi.SSID().length() > 0) {
+        WiFi.reconnect();
+      } else {
+        Serial.println("[WiFi] No stored credentials - skipping reconnect");
+      }
       metrics.wifiReconnects++;
+      // Track how long we've been offline
+      if (wifiDisconnectedSince == 0) {
+        wifiDisconnectedSince = now;
+      }
+      // If WiFi has been disconnected for a long time, do a clean restart of WiFi
+      if ((now - wifiDisconnectedSince) > WIFI_STALE_CONNECTION_TIMEOUT_MS) {
+        Serial.println("[WiFi] Stale disconnect detected (>90s). Restarting WiFi...");
+        publishEvent("wifi_reset", "WiFi stale disconnect - restarting interface", "warning");
+        WiFi.disconnect();
+        // Don't use blocking delay - just continue and let next loop handle it
+        WiFi.mode(WIFI_STA);
+        #ifdef ESP8266
+          WiFi.persistent(true);
+          WiFi.setAutoReconnect(true);
+        #else
+          WiFi.setAutoReconnect(true);
+        #endif
+        WiFi.reconnect();
+        wifiDisconnectedSince = now;  // reset the timer after forced restart
+      }
       // Only log every 5 reconnects to avoid spam
       if (metrics.wifiReconnects % 5 == 1) {
         publishEvent("wifi_reconnect", "WiFi disconnected, reconnect attempt #" + String(metrics.wifiReconnects), "warning");
       }
+    } else if (wifiDisconnectedSince != 0) {
+      // We were disconnected previously and now back online
+      publishEvent("wifi_reconnected", "WiFi reconnected - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
+      wifiDisconnectedSince = 0;
     }
   }
 
@@ -653,12 +831,39 @@ void loop() {
       }
     #endif
     
+    // Check signal strength - defer MQTT if too weak
+    int rssi = WiFi.RSSI();
+    if (rssi < WIFI_MIN_RSSI) {
+      Serial.printf("[WARNING] Signal too weak (%d dBm), deferring MQTT publish\n", rssi);
+      lastPublishTime = now;  // Reset timer to retry later
+      // Still call OTA.handle() before returning
+      ArduinoOTA.handle();
+      return;  // Skip this cycle
+    }
+    
     updateTemperatures();
     yield(); // Feed watchdog between operations
+    
+    #ifdef BATTERY_MONITOR_ENABLED
+      readBattery();
+    #endif
     
     publishTemperature();
     publishStatus();
     lastPublishTime = now;
+  }
+
+  // Periodic status heartbeat (helps diagnose connectivity) - reduced frequency
+  if (now - lastStatusLog >= 30000) {  // Changed from 5000ms to 30000ms (30 seconds)
+    bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+    int rssi = wifiConnected ? WiFi.RSSI() : -999;
+    IPAddress ip = wifiConnected ? WiFi.localIP() : IPAddress(0,0,0,0);
+    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s | OTA:ready\n",
+                  wifiConnected ? "connected" : "disconnected",
+                  rssi,
+                  wifiConnected ? ip.toString().c_str() : "0.0.0.0",
+                  mqttClient.connected() ? "connected" : "disconnected");
+    lastStatusLog = now;
   }
 
   // Update OLED display
@@ -668,6 +873,9 @@ void loop() {
     updateDisplay(temperatureC.c_str(), temperatureF.c_str(), wifiConnected, ipStr.c_str());
     lastDisplayUpdate = millis();
   }
+  
+  // Handle OTA updates (called frequently for responsive OTA)
+  ArduinoOTA.handle();
   
   yield(); // Feed watchdog at end of loop
 }
