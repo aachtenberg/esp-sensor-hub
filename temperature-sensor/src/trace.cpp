@@ -58,9 +58,7 @@ namespace Trace {
     
     g_sequenceNumber = 0;
     
-    Serial.printf("[TRACE] Initialized trace ID (UUID): %s\n", g_traceIdUuid.c_str());
-    Serial.printf("[TRACE] Initialized trace ID (W3C hex): %s\n", g_traceIdHex.c_str());
-    Serial.printf("[TRACE] Initialized span ID: %s\n", g_spanId.c_str());
+    Serial.println("[TRACE] Trace instrumentation initialized");
   }
 
   std::string getTraceId() {

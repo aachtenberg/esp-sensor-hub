@@ -9,9 +9,15 @@
 // Data wire is connected to GPIO 4 on ESP8266/ESP32
 static const int ONE_WIRE_PIN = 4;
 
-// Device board type - MUST match the physical hardware!
+// Device board type - Auto-detected from build environment
 // Options: "esp8266", "esp32", or "esp32s3"
-static const char* DEVICE_BOARD = "esp8266";
+#if defined(ESP32S3)
+  static const char* DEVICE_BOARD = "esp32s3";
+#elif defined(ESP32)
+  static const char* DEVICE_BOARD = "esp32";
+#else
+  static const char* DEVICE_BOARD = "esp8266";
+#endif
 
 // Timing constants
 static const unsigned long WIFI_CHECK_INTERVAL_MS = 15000;    // Check WiFi connection every 15s
@@ -21,6 +27,41 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
   static const int HTTP_TIMEOUT_MS = 5000;   // 5s timeout for ESP8266
 #else
   static const int HTTP_TIMEOUT_MS = 10000;  // 10s timeout for ESP32
+#endif
+
+// =============================================================================
+// BATTERY MONITORING (Optional)
+// =============================================================================
+// Uncomment to enable battery voltage monitoring (ESP32 only)
+// Requires voltage divider on GPIO 34: Battery+ -> 10K -> GPIO34 -> 10K -> GND
+// #define BATTERY_MONITOR_ENABLED
+
+// Only enable battery monitoring on ESP32
+#ifdef ESP32
+  #define BATTERY_MONITOR_ENABLED
+#endif
+
+// Enable battery power profile (disables HTTP server, gates OLED)
+#define BATTERY_POWERED
+
+// Headless battery node: disable OLED hardware (stubs will no-op)
+#define OLED_ENABLED 0
+
+// Enable HTTP API endpoints (JSON only, no HTML dashboard) for remote battery monitoring
+#define API_ENDPOINTS_ONLY
+
+#ifdef BATTERY_MONITOR_ENABLED
+  #ifdef ESP32
+    static const int BATTERY_PIN = 34;           // ADC pin for battery voltage
+    static const float VOLTAGE_DIVIDER = 2.0;    // Voltage divider ratio (R1/(R1+R2))
+    static const float CALIBRATION = 1.098;      // Calibration factor based on actual measurements
+    static const float ADC_MAX = 4095.0;         // 12-bit ADC
+    static const float REF_VOLTAGE = 3.3;        // ESP32 reference voltage
+    static const float BATTERY_MIN_V = 3.0;      // 0% battery voltage
+    static const float BATTERY_MAX_V = 4.2;      // 100% battery voltage
+  #else
+    #error "Battery monitoring is only supported on ESP32"
+  #endif
 #endif
 
 // =============================================================================
@@ -53,5 +94,16 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
   #define OLED_GATE_ENABLED 0             // Always on for mains-powered
   #define HTTP_SERVER_ENABLED 1           // Enable HTTP server for mains-powered
 #endif
+
+// Override HTTP server for API-only mode (if requested)
+#ifdef API_ENDPOINTS_ONLY
+  #undef HTTP_SERVER_ENABLED
+  #define HTTP_SERVER_ENABLED 1           // Enable HTTP for JSON endpoints only
+#endif
+
+// HTTP API Mode (only used if HTTP_SERVER_ENABLED = 1)
+// When enabled, serves only JSON endpoints (/health, /temperaturec, /temperaturef)
+// Disables HTML dashboard (/). Saves memory and reduces bandwidth.
+// #define API_ENDPOINTS_ONLY
 
 #endif // DEVICE_CONFIG_H

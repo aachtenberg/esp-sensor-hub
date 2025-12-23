@@ -77,7 +77,7 @@ Open **Tools → Manage Libraries** and install:
    ```cpp
    #define WIFI_SSID "YourWiFiName"
    #define WIFI_PASSWORD "YourWiFiPassword"
-   #define MQTT_SERVER "192.168.1.100"  // Your MQTT broker IP
+   #define MQTT_SERVER "YOUR_MQTT_BROKER_IP"  // Your MQTT broker IP
    #define MQTT_USER "mqtt_username"
    #define MQTT_PASSWORD "mqtt_password"
    ```

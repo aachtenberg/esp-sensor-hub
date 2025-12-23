@@ -146,17 +146,156 @@ from(bucket: "sensor_data")
 3. Monitor device serial for publish status: `[MQTT] Publishing to ... Publish successful`
 4. Check heap memory isn't exhausted (`free_heap` in status message)
 
+### MQTT Buffer Size Issues
+**Symptom**: Device reports successful MQTT publishes but messages don't appear in broker
+
+**Root Cause**: PubSubClient default buffer (128 bytes) too small for JSON payloads (~350+ bytes)
+
+**Solution**: PlatformIO environments include increased buffer sizes:
+- **ESP32**: `-D MQTT_MAX_PACKET_SIZE=2048` (increased from 512 for large payloads with battery monitoring)
+- **ESP8266**: `-D MQTT_MAX_PACKET_SIZE=512` (sufficient for smaller payloads)
+
+**Symptoms of Buffer Issues**:
+- Device health shows `mqtt_publish_failures: 0` (no recorded failures)
+- Status messages work but temperature messages missing
+- Device appears connected but data not reaching broker
+
+**Verification**: Check MQTT buffer size in platformio.ini build_flags for all environments
+
 ### High Memory Usage
 1. Monitor `free_heap` value in status payload
 2. If < 20KB, device may be unstable or dropping publishes
 3. Reduce publish cadence or disable OLED display to free memory
 4. Check for memory leaks: restart device and monitor heap over time
 
+### OTA Upload Failures (WSL2/Windows)
+**Symptom**: `pio run -t upload` fails with "No response from device" after authentication succeeds
+
+**Root Cause**: Windows Firewall blocks ESP32 OTA port (3232) from WSL2
+
+**Solution Options**:
+
+1. **Temporary Fix (Recommended for testing)**:
+   - Open Windows Security → Firewall & network protection
+   - Turn off "Private network" firewall temporarily
+   - Run OTA upload: `pio run -e esp32dev -t upload`
+   - Re-enable firewall after upload completes
+
+2. **Permanent Fix (Create Firewall Rule)**:
+   - Open Windows Firewall with Advanced Security
+   - Create new Inbound Rule:
+     - Rule Type: Port
+     - Protocol: TCP, Port: 3232
+     - Action: Allow connection
+     - Profile: Private (or all profiles)
+     - Name: ESP32 OTA
+
+**Verification**:
+- Device shows "OTA:ready" in serial monitor
+- Ping works: `ping DEVICE_IP`
+- Port accessible after firewall disabled: `nc -zv DEVICE_IP 3232`
+
+**PlatformIO Configuration** (already correct):
+```ini
+[env:esp32dev]
+upload_protocol = espota
+upload_port = DEVICE_IP
+upload_flags = --auth=YOUR_OTA_PASSWORD --port=3232
+```
+
+### Firmware Version Tracking
+
+**All devices include automatic firmware version tracking** for deployment management and OTA verification.
+
+#### Version Format
+```
+MAJOR.MINOR.PATCH-buildYYYYMMDD
+Example: 1.0.3-build20251222
+```
+
+#### MQTT Version Fields
+All MQTT messages include `firmware_version`:
+```json
+{
+  "device": "Temp Sensor",
+  "firmware_version": "1.0.3-build20251222",
+  "current_temp_c": 23.5,
+  "event": "ota_start"
+}
+```
+
+#### Version Update Process
+```bash
+# Update build timestamp before deployment
+cd temperature-sensor
+./update_version.sh
+
+# Build and upload
+pio run -e esp32dev -t upload
+```
+
+#### OTA Version Tracking
+- **Before OTA**: Device reports current version
+- **OTA Start**: Publishes `ota_start` event with current version  
+- **OTA Complete**: Publishes `ota_complete` event with new version
+- **After Reboot**: All messages show updated version
+
+#### Manual Version Bumps
+For major/minor/patch changes, edit `platformio.ini`:
+```ini
+-D FIRMWARE_VERSION_PATCH=3  # Increment for bug fixes
+```
+
 ### Compilation Errors
 1. Ensure `temperature-sensor/include/secrets.h` exists
 2. Copy from `temperature-sensor/include/secrets.h.example` if needed
 3. Verify MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASSWORD are defined
 4. Check PlatformIO environment matches board type (esp8266 vs esp32dev)
+
+## ESP8266 API-Only Configuration
+
+**ESP8266 temperature sensors can be configured for API-only operation** - no HTML web interface, optimized for USB-powered headless deployment.
+
+### Configuration
+ESP8266 environment automatically enables API-only mode:
+```ini
+[env:esp8266]
+build_flags =
+  -D API_ENDPOINTS_ONLY    # Disables HTML interface
+  -D OLED_ENABLED=0        # No display support
+  -D BATTERY_POWERED       # USB power optimization
+```
+
+### Available Endpoints
+When `API_ENDPOINTS_ONLY` is defined, only these API endpoints are available:
+
+- **GET `/temperaturec`** - Current temperature in Celsius (plain text)
+- **GET `/temperaturef`** - Current temperature in Fahrenheit (plain text)  
+- **GET `/health`** - Device health status (JSON)
+
+**HTML interface (`/`) is disabled** - returns 404 Not Found
+
+### Use Cases
+- **Headless sensors**: USB-powered ESP8266 devices without displays
+- **API integration**: Direct machine-to-machine communication
+- **Resource optimization**: Reduced flash usage, faster boot
+- **Security**: No web interface reduces attack surface
+
+### Deployment
+```bash
+# Build ESP8266 API-only firmware
+pio run -e esp8266
+
+# Flash to device
+pio run -e esp8266 -t upload --upload-port /dev/ttyUSB0
+```
+
+### MQTT Operation
+ESP8266 devices operate identically to ESP32:
+- Publish temperature readings every 30 seconds
+- Publish status updates with device health
+- Include firmware version in all messages
+- Support OTA updates via MQTT commands
 
 ---
 
