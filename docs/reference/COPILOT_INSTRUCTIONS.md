@@ -266,3 +266,220 @@ void setupWiFi() {
 **Implementation Completed**: December 2025  
 **Tested On**: Freenove ESP32-S3 WROOM (8MB Flash, 8MB PSRAM)  
 **Status**: Production-ready, fully functional
+
+---
+
+## MQTT Buffer Size Configuration (December 2025)
+
+**Critical Configuration**: All ESP devices must include increased MQTT buffer size to prevent silent publish failures.
+
+### Root Cause
+PubSubClient library defaults to 128-byte buffer, but JSON payloads exceed this limit:
+- Temperature messages: ~350+ bytes
+- Status messages: ~350+ bytes  
+- Event messages: ~300+ bytes
+
+### Symptoms of Buffer Issues
+- Device reports `mqtt_publish_failures: 0` (no recorded failures)
+- Status messages work but temperature messages missing
+- Device appears connected but data not reaching broker
+- `mqttClient.publish()` returns `true` but payload truncated
+
+### Required Configuration
+**All PlatformIO environments must include**:
+```ini
+build_flags =
+    -D MQTT_MAX_PACKET_SIZE=2048  # ESP32: Increased for battery monitoring payloads
+    -D MQTT_MAX_PACKET_SIZE=512   # ESP8266: Standard size sufficient
+    # ... other flags ...
+```
+
+### Affected Environments
+- `esp32dev` - ESP32 with display
+- `esp32dev-serial` - ESP32 serial upload  
+- `esp8266` - ESP8266 API-only
+- `esp32s3` - ESP32-S3
+
+### Verification Steps
+1. Check platformio.ini has `-D MQTT_MAX_PACKET_SIZE=2048` for ESP32 and `=512` for ESP8266 in all environments
+2. Monitor MQTT broker: `mosquitto_sub -h broker -t "esp-sensor-hub/#" -v`
+3. Verify both temperature and status messages appear
+4. Check device health shows recent MQTT activity
+
+### Files to Reference
+- **Configuration**: `temperature-sensor/platformio.ini` - Buffer size flags
+- **Implementation**: `temperature-sensor/src/main.cpp` - JSON payload generation
+- **Documentation**: `docs/reference/CONFIG.md` - Troubleshooting section
+- **Testing**: Use health API `/health` to verify `mqtt_seconds_ago` updates
+
+### Prevention
+- Always include buffer size flag in new environments
+- Test MQTT publishing after firmware changes
+- Monitor for missing temperature data vs status data
+
+**Issue Discovered**: December 2025  
+**Platforms Affected**: All ESP8266/ESP32 devices  
+**Status**: Fixed, documented, required for all builds
+
+---
+
+## WSL2 OTA Upload Issues (December 2025)
+
+**Critical Development Issue**: OTA uploads fail on WSL2/Windows with "No response from device" after authentication succeeds.
+
+### Root Cause
+Windows Firewall blocks ESP32 OTA port (3232) from WSL2 network traffic, even when firewall rules appear correctly configured.
+
+### Symptoms
+- `pio run -t upload` shows authentication success but then "No response from device"
+- Device shows "OTA:ready" in serial monitor
+- Ping works: `ping YOUR_DEVICE_IP` succeeds
+- Port test fails: `nc -zv YOUR_DEVICE_IP 3232` shows "Connection refused"
+
+### PlatformIO Configuration (Must Be Present)
+```ini
+[env:esp32dev]
+upload_protocol = espota
+upload_port = YOUR_DEVICE_IP  # Device IP address
+upload_flags = 
+    --auth=YOUR_OTA_PASSWORD          # Must match OTA_PASSWORD in secrets.h
+    --port=3232              # ESP32 OTA port
+```
+
+### Solution Options
+
+#### Option 1: Temporary Firewall Disable (Recommended for Development)
+```powershell
+# Run in Windows PowerShell as Administrator
+Set-NetFirewallProfile -Profile Private -Enabled False
+# Run OTA upload
+pio run -e esp32dev -t upload
+# Re-enable firewall
+Set-NetFirewallProfile -Profile Private -Enabled True
+```
+
+#### Option 2: Create Permanent Firewall Rule
+1. Open Windows Firewall with Advanced Security
+2. Create new Inbound Rule:
+   - Rule Type: Port
+   - TCP Port: 3232
+   - Action: Allow connection
+   - Profile: Private
+   - Name: ESP32 OTA
+
+### Verification Steps
+1. Confirm device is running: `pio device monitor` shows "OTA:ready"
+2. Test network: `ping YOUR_DEVICE_IP` works
+3. Test port access: `nc -zv YOUR_DEVICE_IP 3232` succeeds after firewall adjustment
+4. Run upload: `pio run -e esp32dev -t upload` completes successfully
+
+### Code Requirements
+- ArduinoOTA library must be included and configured
+- OTA_PASSWORD defined in secrets.h (default: "YOUR_OTA_PASSWORD")
+- Device hostname set via ArduinoOTA.setHostname()
+- OTA handler calls in main loop: `ArduinoOTA.handle()`
+
+### Files to Reference
+- **Configuration**: `temperature-sensor/platformio.ini` - Correct OTA settings
+- **Implementation**: `temperature-sensor/src/main.cpp` - ArduinoOTA setup
+- **Secrets**: `temperature-sensor/include/secrets.h` - OTA_PASSWORD definition
+- **Documentation**: `docs/reference/CONFIG.md` - Complete troubleshooting section
+
+### Prevention
+- Always test OTA after initial device setup
+- Document device IP addresses for team reference
+- Include firewall note in development environment setup
+
+**Issue Discovered**: December 2025  
+**Platforms Affected**: WSL2 on Windows 10/11  
+**Status**: Documented, workaround available
+
+---
+
+## Firmware Version Tracking (December 2025)
+
+**All ESP32 devices now include automatic firmware version tracking** for deployment management and OTA verification.
+
+### Version Format
+```
+MAJOR.MINOR.PATCH-buildYYYYMMDD
+Example: 1.0.3-build20251222
+```
+
+### Implementation Details
+
+#### Build Configuration (platformio.ini)
+```ini
+build_flags =
+    -D CPU_FREQ_MHZ=80
+    -D WIFI_PS_MODE=WIFI_PS_MIN_MODEM
+    -D FIRMWARE_VERSION_MAJOR=1
+    -D FIRMWARE_VERSION_MINOR=0
+    -D FIRMWARE_VERSION_PATCH=2
+    -D BUILD_TIMESTAMP=20251222
+```
+
+#### Version Header (include/version.h)
+```cpp
+#define FIRMWARE_VERSION_STRING String(FIRMWARE_VERSION_MAJOR) + "." + String(FIRMWARE_VERSION_MINOR) + "." + String(FIRMWARE_VERSION_PATCH) + "-build" + String(BUILD_TIMESTAMP)
+inline String getFirmwareVersion() { return FIRMWARE_VERSION_STRING; }
+```
+
+#### MQTT Integration
+All MQTT messages include `firmware_version` field:
+```json
+{
+  "device": "Temp Sensor",
+  "firmware_version": "1.0.3-build20251222",
+  "current_temp_c": 23.5
+}
+```
+
+### Version Update Process
+
+#### Automatic Build Timestamp
+```bash
+cd temperature-sensor
+./update_version.sh  # Updates BUILD_TIMESTAMP to current date
+```
+
+#### Manual Version Bumps
+For major/minor/patch changes, update platformio.ini:
+```ini
+-D FIRMWARE_VERSION_PATCH=3  # Increment for bug fixes
+```
+
+### OTA Version Tracking
+
+**Before OTA**: Device reports current version  
+**OTA Start**: Publishes `ota_start` event with current version  
+**OTA Complete**: Publishes `ota_complete` event with new version  
+**After Reboot**: All messages show updated version  
+
+### Verification Commands
+```bash
+# Check current version in MQTT messages
+mosquitto_sub -h localhost -t "home/temperature-sensor/+/temperature"
+
+# Update version before build
+cd temperature-sensor && ./update_version.sh
+
+# Build and upload
+pio run -e esp32dev -t upload
+```
+
+### Files to Reference
+- **Version Header**: `temperature-sensor/include/version.h`
+- **Build Config**: `temperature-sensor/platformio.ini` 
+- **Update Script**: `temperature-sensor/update_version.sh`
+- **Implementation**: `temperature-sensor/src/main.cpp` (getFirmwareVersion() usage)
+- **Documentation**: `temperature-sensor/README_VERSION.md`
+
+### Benefits
+- **OTA Success Verification**: Confirm updates by checking version changes in MQTT
+- **Device Inventory**: Track which firmware versions are deployed
+- **Debugging**: Correlate issues with specific firmware versions
+- **Compliance**: Version tracking for regulatory requirements
+
+**Implementation Date**: December 2025  
+**Status**: Active, required for all new builds

@@ -4,6 +4,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 
 ## Table of Contents
 - [Overview](#overview)
+- [Device Inventory](#device-inventory)
 - [Quick Start](#quick-start)
 - [Surveillance Camera](#surveillance-camera)
 - [Temperature Sensor Project](#temperature-sensor-project)
@@ -38,7 +39,28 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 - **Features**: Real-time solar monitoring, battery state tracking, VE.Direct protocol
 - **Status**: ✅ Production - Solar system monitoring
 
-### System Architecture
+---
+
+## Device Inventory
+
+**📋 [DEVICE_INVENTORY.md](DEVICE_INVENTORY.md)** - Complete device tracking and update status
+
+### Currently Deployed Devices
+- **Pump House** (ESP8266) - Temperature monitoring, recently updated with MQTT buffer fix
+- **Main Cottage** (ESP8266) - Temperature monitoring  
+- **Small Garage** (ESP32) - Temperature monitoring with OLED display
+- **Big Garage** (ESP32) - Status confirmed via MQTT
+- **Spa** (ESP32) - Status confirmed via MQTT
+- **Sauna** (ESP32) - Status confirmed via MQTT
+- **Mobile Temp Sensor** (ESP8266) - Status confirmed via MQTT
+
+### Update Status
+- ✅ **Pump House**: Updated Dec 22, 2025 - MQTT buffer size fix applied
+- 🔍 **Others**: Monitoring for MQTT publishing issues, updates available via OTA/serial
+
+---
+
+## System Architecture
 
 ```
 Devices (Temperature/Solar/Camera)
@@ -77,12 +99,22 @@ cp temperature-sensor/include/secrets.h.example temperature-sensor/include/secre
 ```
 
 ### 2. Flash Device
+
+**Initial USB Flash (required once):**
 ```bash
 # Temperature sensor (ESP8266/ESP32)
 cd temperature-sensor && pio run -e esp8266 -t upload --upload-port /dev/ttyUSB0
 
 # Or ESP32:
 pio run -e esp32dev -t upload --upload-port /dev/ttyUSB0
+```
+
+**Future Updates via OTA (no USB cable needed):**
+```bash
+# After device is on WiFi, update by IP address
+pio run -e esp32dev -t upload --upload-port 192.168.0.XXX
+
+# OTA password required (set in secrets.h: OTA_PASSWORD)
 ```
 
 ### 3. Configure via WiFiManager Portal
@@ -146,12 +178,14 @@ GND → GND                 GND → GND
 ### Features
 
 - Temperature monitoring in °C and °F via MQTT
+- **OTA firmware updates** - Update devices over WiFi without USB cable
 - MQTT JSON publishing every 30 seconds
 - Retained status messages with WiFi/heap info
 - Event logging (boot, WiFi, sensor errors)
 - Optional OLED display for local status
 - WiFi auto-reconnect with failure tracking
 - Serial logging for debugging
+- **Battery monitoring** (ESP32 only) - Voltage and percentage tracking for battery-powered deployments
 
 ### MQTT Topics
 
@@ -209,6 +243,7 @@ The ESP32 solar monitor publishes real-time solar metrics (voltage, current, pow
 | Display | U8g2 | 2.36.15 | OLED driver (optional) |
 | Reset | ESP_DoubleResetDetector | 1.3.2 | Factory reset on double-reset (ESP8266) |
 | Reset (S3) | Preferences (NVS) | Built-in | Triple-reset detection for ESP32-S3 |
+| **OTA Updates** | **ArduinoOTA** | **2.0.0** | **Over-the-air firmware updates** |
 
 ---
 
@@ -223,6 +258,6 @@ The ESP32 solar monitor publishes real-time solar metrics (voltage, current, pow
 
 ---
 
-**Last Updated**: December 15, 2025  
+**Last Updated**: December 22, 2025  
 **Current Branch**: main  
 **Architecture**: MQTT-based data streaming with optional InfluxDB v3 integration
