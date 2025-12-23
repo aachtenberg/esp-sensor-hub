@@ -171,6 +171,33 @@ from(bucket: "sensor_data")
 
 **Recovery**: Replace DS18B20 sensor or fix wiring - device firmware is correct
 
+### ESP8266 Deep Sleep Hardware Requirement
+**Critical**: ESP8266 deep sleep requires hardware modification for timer wake-up
+
+**Symptom**: Device enters deep sleep but never wakes up (permanent sleep)
+
+**Root Cause**: ESP8266 timer wake-up requires GPIO 16 connected to RST pin
+
+**Required Hardware Modification**:
+```
+ESP8266 RST pin ──► 10KΩ resistor ──► ESP8266 GPIO 16 (D0)
+                                      │
+                                      └─► 0.1µF capacitor ──► GND
+```
+
+**Why Required**:
+- ESP8266 deep sleep timer uses RTC to trigger wake-up
+- RTC needs to pulse RST pin to wake the device
+- GPIO 16 is the only pin that can be used for this purpose
+- Without this connection, device sleeps forever
+
+**Implementation**:
+- Connect RST to GPIO 16 via 10KΩ resistor (prevents short circuit)
+- Add 0.1µF capacitor from GPIO 16 to GND (debouncing)
+- Device will show warning in serial: `GPIO 16 must be connected to RST for wake-up`
+
+**Testing**: After hardware mod, device will wake up reliably from deep sleep
+
 ### MQTT Buffer Size Issues
 **Symptom**: Device reports successful MQTT publishes but messages don't appear in broker
 

@@ -73,6 +73,10 @@ struct DeviceMetrics {
 // Global instances
 DeviceMetrics metrics;
 
+// Deep sleep configuration
+int deepSleepSeconds = 0;  // Default disabled
+const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
+
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
 
@@ -98,20 +102,14 @@ PubSubClient mqttClient(espClient);
 String chipId;
 String topicBase;
 unsigned long lastMqttReconnectAttempt = 0;
-unsigned long lastMqttConnectionCheck = 0;  // Track when we last checked MQTT status
+unsigned long lastMqttConnectionCheck = 0;
 unsigned long lastPublishTime = 0;
 unsigned long lastSuccessfulMqttCheck = 0;
-unsigned long mqttReconnectInterval = 5000;  // Dynamic backoff interval
-unsigned long mqttBackoffResetTime = 0;      // Track when backoff started for periodic reset
-unsigned int mqttConsecutiveFailures = 0;    // Count consecutive connection failures
-int lastMqttState = MQTT_DISCONNECTED;       // Track last known MQTT state for change detection
+int lastMqttState = MQTT_DISCONNECTED;
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
-const unsigned long MQTT_RECONNECT_INTERVAL_MAX_MS = 30000;  // Max 30s backoff (reduced from 60s)
-const unsigned long MQTT_CONNECTION_CHECK_INTERVAL_MS = 30000;  // Check connection health every 30s
+const unsigned long MQTT_CONNECTION_CHECK_INTERVAL_MS = 30000;
 const unsigned long MQTT_PUBLISH_INTERVAL_MS = 30000;
 const unsigned long MQTT_STALE_CONNECTION_TIMEOUT_MS = 120000;  // Force reconnect if no activity for 2 mins
-const unsigned long MQTT_BACKOFF_RESET_INTERVAL_MS = 300000;   // Reset backoff to minimum every 5 mins
-const unsigned int MQTT_MAX_CONSECUTIVE_FAILURES = 10;         // Reset backoff after this many failures
 
 // WiFi reconnection tracking
 unsigned long wifiDisconnectedSince = 0;
@@ -175,6 +173,67 @@ void saveDeviceName(const char* name) {
   }
 }
 
+// Load deep sleep config from filesystem
+void loadDeepSleepConfig() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] Failed to mount SPIFFS");
+    deepSleepSeconds = 0;
+    return;
+  }
+  // Load deepSleepSeconds from SPIFFS file
+  File file = SPIFFS.open(DEEP_SLEEP_FILE, "r");
+  if (file) {
+    deepSleepSeconds = file.readStringUntil('\n').toInt();
+    file.close();
+    Serial.printf("[DEEP SLEEP] Loaded config: %d seconds\n", deepSleepSeconds);
+  } else {
+    deepSleepSeconds = 0; // Default: no deep sleep
+    Serial.println("[DEEP SLEEP] No config file found, defaulting to 0 (no deep sleep)");
+  }
+#else // ESP8266
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] Failed to mount LittleFS");
+    deepSleepSeconds = 0;
+    return;
+  }
+  // Load deepSleepSeconds from LittleFS file
+  File file = LittleFS.open(DEEP_SLEEP_FILE, "r");
+  if (file) {
+    deepSleepSeconds = file.readStringUntil('\n').toInt();
+    file.close();
+    Serial.printf("[DEEP SLEEP] Loaded config: %d seconds\n", deepSleepSeconds);
+  } else {
+    deepSleepSeconds = 0; // Default: no deep sleep
+    Serial.println("[DEEP SLEEP] No config file found, defaulting to 0 (no deep sleep)");
+  }
+#endif
+}
+
+// Save deep sleep config to filesystem
+void saveDeepSleepConfig() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] Failed to mount SPIFFS for save");
+    return;
+  }
+  File file = SPIFFS.open(DEEP_SLEEP_FILE, "w");
+#else // ESP8266
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] Failed to mount LittleFS for save");
+    return;
+  }
+  File file = LittleFS.open(DEEP_SLEEP_FILE, "w");
+#endif
+  if (file) {
+    file.println(deepSleepSeconds);
+    file.close();
+    Serial.printf("[DEEP SLEEP] Saved config: %d seconds\n", deepSleepSeconds);
+  } else {
+    Serial.println("[DEEP SLEEP] Failed to save config file");
+  }
+}
+
 // Forward declarations
 String generateChipId();
 String sanitizeDeviceName(const char* name);
@@ -183,6 +242,7 @@ bool ensureMqttConnected();
 void publishEvent(const String& eventType, const String& message, const String& severity = "info");
 void publishTemperature();
 void publishStatus();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 // Validate that temperature reading is valid
 bool isValidTemperature(const String& temp) {
@@ -306,6 +366,10 @@ String getTopicEvents() {
   return topicBase + "/events";
 }
 
+String getTopicCommand() {
+  return topicBase + "/command";
+}
+
 // Helper to get MQTT state description for logging
 const char* getMqttStateString(int state) {
   switch (state) {
@@ -347,8 +411,6 @@ bool ensureMqttConnected() {
       // Fall through to reconnection logic below
     } else {
       lastSuccessfulMqttCheck = now;
-      mqttConsecutiveFailures = 0;  // Reset failure count on successful connection
-      mqttBackoffResetTime = 0;     // Reset backoff timer
       return true;
     }
   }
@@ -358,32 +420,12 @@ bool ensureMqttConnected() {
     return false;
   }
 
-  // Periodic backoff reset: if we've been failing for too long, reset to try more aggressively
-  if (mqttBackoffResetTime > 0 && (now - mqttBackoffResetTime) > MQTT_BACKOFF_RESET_INTERVAL_MS) {
-    Serial.println("[MQTT] Backoff reset - trying more aggressively");
-    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;
-    mqttBackoffResetTime = now;
-    mqttConsecutiveFailures = 0;
-  }
-
-  // Also reset backoff after too many consecutive failures (try fresh)
-  if (mqttConsecutiveFailures >= MQTT_MAX_CONSECUTIVE_FAILURES) {
-    Serial.printf("[MQTT] %u consecutive failures - resetting backoff\n", mqttConsecutiveFailures);
-    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;
-    mqttConsecutiveFailures = 0;
-  }
-
-  // Rate limit reconnection attempts using dynamic backoff interval
-  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) < mqttReconnectInterval) {
+  // Simple rate limit: don't try reconnecting too frequently
+  if (lastMqttReconnectAttempt > 0 && (now - lastMqttReconnectAttempt) < MQTT_RECONNECT_INTERVAL_MS) {
     return false;
   }
 
   lastMqttReconnectAttempt = now;
-
-  // Start tracking backoff time on first failure
-  if (mqttBackoffResetTime == 0) {
-    mqttBackoffResetTime = now;
-  }
 
   String clientId = String(deviceName) + "-" + chipId;
   Serial.printf("[MQTT] Attempting connection to %s:%d as %s\n",
@@ -399,20 +441,16 @@ bool ensureMqttConnected() {
 
   if (connected) {
     Serial.println("[MQTT] Connected to broker");
+    // Subscribe to command topic
+    mqttClient.subscribe(getTopicCommand().c_str());
+    Serial.printf("[MQTT] Subscribed to command topic: %s\n", getTopicCommand().c_str());
     lastSuccessfulMqttCheck = now;
-    mqttReconnectInterval = MQTT_RECONNECT_INTERVAL_MS;  // Reset backoff on success
-    mqttConsecutiveFailures = 0;
-    mqttBackoffResetTime = 0;
     lastMqttState = MQTT_CONNECTED;
   } else {
-    mqttConsecutiveFailures++;
     int state = mqttClient.state();
-    Serial.printf("[MQTT] Connection failed: %s (state: %d), failures: %u, retry in %lu sec\n",
-                  getMqttStateString(state), state, mqttConsecutiveFailures,
-                  mqttReconnectInterval / 1000);
+    Serial.printf("[MQTT] Connection failed: %s (state: %d), retry in %lu sec\n",
+                  getMqttStateString(state), state, MQTT_RECONNECT_INTERVAL_MS / 1000);
     metrics.mqttPublishFailures++;
-    // Exponential backoff: double interval up to max
-    mqttReconnectInterval = min(mqttReconnectInterval * 2, MQTT_RECONNECT_INTERVAL_MAX_MS);
   }
   return connected;
 }
@@ -504,6 +542,40 @@ void publishStatus() {
   publishJson(getTopicStatus(), doc, true);
 }
 
+// Enter deep sleep if configured
+void enterDeepSleepIfEnabled() {
+  if (deepSleepSeconds > 0) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  DEEP SLEEP ACTIVATED");
+    Serial.println("========================================");
+    Serial.printf("[DEEP SLEEP] Entering deep sleep for %d seconds...\n", deepSleepSeconds);
+    #ifdef ESP8266
+      Serial.println();
+      Serial.println("*** CRITICAL HARDWARE REQUIREMENT ***");
+      Serial.println("GPIO 16 (D0) MUST be connected to RST pin for wake-up!");
+      Serial.println("Without this connection, device will sleep FOREVER!");
+      Serial.println("Circuit: RST ──► 10KΩ ──► GPIO 16, with 0.1µF cap GPIO16─►GND");
+      Serial.println("*** END HARDWARE REQUIREMENT ***");
+      Serial.println();
+    #endif
+    publishEvent("deep_sleep", "Entering deep sleep for " + String(deepSleepSeconds) + " seconds", "info");
+
+    // Give MQTT time to send the message
+    mqttClient.loop();
+    delay(100);
+
+#ifdef ESP8266
+    // ESP8266 deep sleep with timer requires GPIO 16 (D0) connected to RST pin
+    // For proper wake-up: RST -> 10K resistor -> GPIO 16, with 0.1µF capacitor RST->GND
+    ESP.deepSleep(deepSleepSeconds * 1000000ULL); // microseconds
+#else // ESP32
+    esp_sleep_enable_timer_wakeup(deepSleepSeconds * 1000000ULL);
+    esp_deep_sleep_start();
+#endif
+  }
+}
+
 // HTML page with template placeholders
 const char index_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>%PAGE_TITLE%</title><style>body{margin:0;padding:8px;background:#0f172a;font-family:system-ui;color:#e2e8f0;text-align:center}.c{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;max-width:350px;margin:0 auto}.h{margin-bottom:12px}.dn{font-size:1.3rem;font-weight:600;color:#94a3b8;margin-bottom:4px}.st{font-size:0.8rem;color:#94a3b8}.si{display:inline-block;width:8px;height:8px;background:#10b981;border-radius:50%;margin-right:4px;animation:p 2s infinite}@keyframes p{0%,100%{opacity:1}50%{opacity:0.5}}.td{background:linear-gradient(135deg,#1e3a5f,#0f172a);border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:12px}.tdc{display:flex;justify-content:center;align-items:baseline;gap:4px}.tv{font-size:3rem;font-weight:700;color:#38bdf8}.tu{font-size:0.9rem;color:#94a3b8}.f{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;display:flex;justify-content:center;align-items:center;gap:6px}.tl{font-size:0.85rem;color:#94a3b8}.tr{font-size:1.5rem;font-weight:700;color:#38bdf8}.ft{margin-top:12px;padding-top:8px;border-top:1px solid #334155;font-size:0.7rem;color:#64748b}</style></head><body><div class="c"><div class="h"><div class="dn">%PAGE_TITLE%</div><div><span class="si"></span><span class="st">Live</span></div></div><div class="td"><div class="tdc"><div class="tv" id="tc">%TEMPERATUREC%</div><div class="tu">C</div></div></div><div class="f"><span class="tr" id="tf">%TEMPERATUREF%</span><span class="tl">F</span></div><div class="ft">Updates every 15s</div></div><script>function u(){fetch('/temperaturec').then(r=>r.text()).then(d=>{document.getElementById('tc').textContent=d}).catch(e=>{});fetch('/temperaturef').then(r=>r.text()).then(d=>{document.getElementById('tf').textContent=d}).catch(e=>{});}u();setInterval(u,15000);</script></body></html>)rawliteral";
 
@@ -577,6 +649,63 @@ void handleHealth() {
   server.send(200, "application/json", response);
 }
 
+void handleDeepSleepGet() {
+  JsonDocument doc;
+  doc["deep_sleep_seconds"] = deepSleepSeconds;
+  doc["device"] = deviceName;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleDeepSleepPost() {
+  if (server.hasArg("seconds")) {
+    int newSeconds = server.arg("seconds").toInt();
+    if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
+      deepSleepSeconds = newSeconds;
+      saveDeepSleepConfig();
+      publishEvent("deep_sleep_config", "Deep sleep set to " + String(deepSleepSeconds) + " seconds", "info");
+      server.send(200, "application/json", "{\"status\":\"ok\",\"deep_sleep_seconds\":" + String(deepSleepSeconds) + "}");
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Invalid seconds value (0-3600)\"}");
+    }
+  } else {
+    server.send(400, "application/json", "{\"error\":\"Missing 'seconds' parameter\"}");
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String topicStr = String(topic);
+  String payloadStr;
+  for (unsigned int i = 0; i < length; i++) {
+    payloadStr += (char)payload[i];
+  }
+
+  Serial.printf("[MQTT] Received command: %s = %s\n", topicStr.c_str(), payloadStr.c_str());
+
+  // Handle deep sleep configuration commands
+  if (topicStr.endsWith("/command")) {
+    if (payloadStr.startsWith("deepsleep ")) {
+      String secondsStr = payloadStr.substring(10); // Remove "deepsleep " prefix
+      int newSeconds = secondsStr.toInt();
+      if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
+        deepSleepSeconds = newSeconds;
+        saveDeepSleepConfig();
+        publishEvent("deep_sleep_config", "Deep sleep set to " + String(deepSleepSeconds) + " seconds via MQTT", "info");
+        publishStatus(); // Publish updated status
+      } else {
+        publishEvent("command_error", "Invalid deep sleep seconds: " + secondsStr, "error");
+      }
+    } else if (payloadStr == "status") {
+      publishStatus();
+    } else if (payloadStr == "restart") {
+      publishEvent("device_restart", "Restarting device via MQTT command", "warning");
+      delay(500);
+      ESP.restart();
+    }
+  }
+}
+
 void setupWebServer() {
 #ifndef API_ENDPOINTS_ONLY
   server.on("/", HTTP_GET, handleRoot);
@@ -584,6 +713,8 @@ void setupWebServer() {
   server.on("/temperaturec", HTTP_GET, handleTemperatureC);
   server.on("/temperaturef", HTTP_GET, handleTemperatureF);
   server.on("/health", HTTP_GET, handleHealth);
+  server.on("/deepsleep", HTTP_GET, handleDeepSleepGet);
+  server.on("/deepsleep", HTTP_POST, handleDeepSleepPost);
   server.begin();
   Serial.println("[HTTP] Web server started on port 80");
 }
@@ -752,6 +883,9 @@ void setup() {
   // Load device name from filesystem
   loadDeviceName();
 
+  // Load deep sleep configuration
+  loadDeepSleepConfig();
+
   chipId = generateChipId();
   updateTopicBase();
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
@@ -762,6 +896,7 @@ void setup() {
 #endif
   mqttClient.setKeepAlive(30);
   mqttClient.setSocketTimeout(5);  // Reduced from 15s to minimize blocking during connection issues
+  mqttClient.setCallback(mqttCallback);
 
   // Start up the DS18B20 library
   sensors.begin();
@@ -820,7 +955,8 @@ void loop() {
   server.handleClient();
 
   // Process MQTT messages - detect connection loss early
-  if (!mqttClient.loop()) {
+  bool mqttLoopResult = mqttClient.loop();
+  if (!mqttLoopResult) {
     // loop() returns false if disconnected - log state change immediately
     int currentState = mqttClient.state();
     if (currentState != lastMqttState && lastMqttState == MQTT_CONNECTED) {
@@ -832,14 +968,14 @@ void loop() {
 
   unsigned long now = millis();
 
-  // MQTT connection management - check health periodically (catches stale connections)
+  // MQTT connection management
   if ((now - lastMqttConnectionCheck) > MQTT_CONNECTION_CHECK_INTERVAL_MS) {
     lastMqttConnectionCheck = now;
-    ensureMqttConnected();  // This checks for stale connections even if "connected"
+    ensureMqttConnected();
   }
 
-  // Reconnect if disconnected, respecting backoff interval
-  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= mqttReconnectInterval) {
+  // Reconnect if disconnected
+  if (!mqttClient.connected() && (now - lastMqttReconnectAttempt) >= MQTT_RECONNECT_INTERVAL_MS) {
     ensureMqttConnected();
   }
 
@@ -892,8 +1028,13 @@ void loop() {
       // Check heap before operations
       uint32_t freeHeap = ESP.getFreeHeap();
       if (freeHeap < 8000) {
-        Serial.print("[WARNING] Low heap: ");
-        Serial.println(freeHeap);
+        Serial.printf("[WARNING] Low heap: %lu bytes\n", freeHeap);
+        // Force MQTT reconnection on critically low memory
+        if (freeHeap < 6000) {
+          Serial.println("[WARNING] Critical heap - reconnecting MQTT");
+          mqttClient.disconnect();
+          lastMqttReconnectAttempt = 0;  // Force immediate reconnect
+        }
       }
     #endif
     
@@ -917,6 +1058,9 @@ void loop() {
     publishTemperature();
     publishStatus();
     lastPublishTime = now;
+
+    // Enter deep sleep if configured (after successful publish)
+    enterDeepSleepIfEnabled();
   }
 
   // Periodic status heartbeat (helps diagnose connectivity)
@@ -927,14 +1071,13 @@ void loop() {
     bool mqttConnected = mqttClient.connected();
     int mqttState = mqttClient.state();
 
-    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s(%s) failures:%u backoff:%lus\n",
+    Serial.printf("[Status] WiFi:%s RSSI:%d IP:%s | MQTT:%s(%s) failures:%u\n",
                   wifiConnected ? "OK" : "DOWN",
                   rssi,
                   wifiConnected ? ip.toString().c_str() : "0.0.0.0",
                   mqttConnected ? "OK" : "DOWN",
                   getMqttStateString(mqttState),
-                  mqttConsecutiveFailures,
-                  mqttReconnectInterval / 1000);
+                  metrics.mqttPublishFailures);
 
     // Log last successful publish age if having issues
     if (!mqttConnected && metrics.lastSuccessfulMqttPublish > 0) {
