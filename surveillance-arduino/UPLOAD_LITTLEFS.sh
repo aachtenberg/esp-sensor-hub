@@ -1,6 +1,11 @@
 #!/bin/bash
-# Upload LittleFS filesystem to ESP32-CAM
-# Usage: ./UPLOAD_LITTLEFS.sh [port]
+# Upload LittleFS filesystem to ESP32 devices
+# Usage: ./UPLOAD_LITTLEFS.sh [port] [chip]
+#
+# Examples:
+#   ./UPLOAD_LITTLEFS.sh                    # ESP32-CAM on /dev/ttyUSB0
+#   ./UPLOAD_LITTLEFS.sh /dev/ttyACM0 s3    # ESP32-S3 on /dev/ttyACM0
+#   ./UPLOAD_LITTLEFS.sh /dev/ttyUSB0 esp32 # ESP32-CAM on /dev/ttyUSB0
 #
 # This uploads the data/ folder contents to the LittleFS partition
 # Required for serving gzipped web content (reduces 27KB to 6.7KB)
@@ -8,6 +13,7 @@
 set -e
 
 PORT=${1:-/dev/ttyUSB0}
+CHIP=${2:-esp32}
 SKETCH_DIR="ESP32CAM_Surveillance"
 DATA_DIR="$SKETCH_DIR/data"
 
@@ -15,14 +21,29 @@ DATA_DIR="$SKETCH_DIR/data"
 MKLITTLEFS="$HOME/.arduino15/packages/esp32/tools/mklittlefs/4.0.2-db0513a/mklittlefs"
 ESPTOOL="$HOME/.arduino15/packages/esp32/tools/esptool_py/5.1.0/esptool"
 
-# ESP32-CAM partition layout (huge_app scheme):
+# Partition layout (huge_app scheme - same for both chips):
 # - App: 0x10000, size 3MB
 # - SPIFFS/LittleFS: 0x290000, size 0xF0000 (960KB)
 LITTLEFS_ADDR="0x290000"
 LITTLEFS_SIZE="0xF0000"  # 960KB
 
-echo "📁 LittleFS Upload for ESP32-CAM"
+# Normalize chip type
+case "$CHIP" in
+    s3|S3|esp32s3|ESP32S3|esp32-s3)
+        CHIP="esp32s3"
+        BAUD=921600
+        CHIP_NAME="ESP32-S3"
+        ;;
+    *)
+        CHIP="esp32"
+        BAUD=460800
+        CHIP_NAME="ESP32-CAM"
+        ;;
+esac
+
+echo "📁 LittleFS Upload for $CHIP_NAME"
 echo "   Port: $PORT"
+echo "   Chip: $CHIP"
 echo "   Data folder: $DATA_DIR"
 echo ""
 
@@ -60,8 +81,8 @@ echo ""
 
 # Upload to device
 echo "📤 Uploading to $PORT at address $LITTLEFS_ADDR..."
-$ESPTOOL --chip esp32 --port "$PORT" --baud 460800 \
-    write_flash $LITTLEFS_ADDR "$LITTLEFS_BIN"
+$ESPTOOL --chip $CHIP --port "$PORT" --baud $BAUD \
+    write-flash $LITTLEFS_ADDR "$LITTLEFS_BIN"
 
 echo ""
 echo "✅ LittleFS upload complete!"
