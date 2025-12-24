@@ -740,7 +740,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.printf("[MQTT] Received command: %s = %s\n", topic, payloadStr);
 
   // Handle deep sleep configuration commands (exact topic match to avoid false positives)
-  if (strcmp(topic, getTopicCommand()) == 0) {
+  if (strcmp(topic, getTopicCommand().c_str()) == 0) {
     if (strncmp(payloadStr, "deepsleep ", 10) == 0) {
       int newSeconds = atoi(payloadStr + 10); // Parse number after "deepsleep "
       if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
