@@ -297,6 +297,40 @@ esp-sensor-hub/Spa/events {"event":"wifi_connected","uptime_seconds":2}
 1. Check serial output shows: `*** WOKE FROM DEEP SLEEP (TIMER) ***`
 2. Verify WiFi/MQTT disconnect before sleep: `[DEEP SLEEP] Disconnecting MQTT and WiFi...`
 3. Confirm RTC timer configured: `[DEEP SLEEP] Configuring RTC timer for X microseconds`
+
+**WiFi Connection Failures on Wake** (v1.1.1+):
+Deep sleep devices use smart WiFi retry logic to conserve battery:
+
+1. **3 connection attempts** with 10-second timeout each
+2. **No captive portal** - portal drains battery waiting for user
+3. **Returns to sleep** if WiFi fails - will retry on next wake cycle
+4. **Automatic recovery** - retries every wake until WiFi available
+
+**Serial Output Example**:
+```
+*** WOKE FROM DEEP SLEEP (TIMER) ***
+[WiFi] Normal boot - attempting connection...
+[WiFi] Connecting to saved network: MyNetwork
+[WiFi] Connection attempt 1/3...
+[WiFi] Attempt 1 failed (status: 6)
+[WiFi] Retrying...
+[WiFi] Connection attempt 2/3...
+[WiFi] Connected! IP: 192.168.0.135, RSSI: -68 dBm
+```
+
+**If WiFi Fails All Retries**:
+```
+[WiFi] All connection attempts failed
+[WiFi] Battery-powered device - skipping portal to conserve power
+[WiFi] Will retry on next wake cycle
+[WiFi] Tip: Double-tap reset button if you need to reconfigure WiFi
+```
+
+**Manual Reconfiguration**:
+- **Double-tap reset button** to force WiFiManager portal
+- Device creates "Temp-DEVICE-Setup" AP
+- Connect and configure WiFi credentials
+- Portal only starts on explicit double-tap, never on transient failures
 4. Monitor MQTT for temperature messages (proves device is waking)
 5. If stuck sleeping, manually reset device
 

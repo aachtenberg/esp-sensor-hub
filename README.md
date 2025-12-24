@@ -24,8 +24,8 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 **Temperature Sensor** (Active - 8 Devices Deployed)
 - **Hardware**: ESP8266/ESP32 + DS18B20 temperature sensor
 - **Transport**: MQTT JSON publishing to central broker
-- **Features**: WiFiManager portal config, deep sleep mode, event logging, optional OLED display, OTA updates
-- **Status**: ✅ Production - 8 deployed locations (6 updated to v1.1.0)
+- **Features**: WiFiManager portal config, deep sleep mode with smart WiFi retry, event logging, optional OLED display, OTA updates
+- **Status**: ✅ Production - 8 deployed locations (6 updated to v1.1.0, v1.1.1 ready)
 
 **Surveillance Camera** (Active)
 - **Hardware**: ESP32-S3 + OV2640 camera + optional SD card
@@ -49,23 +49,25 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 - **Pump House** (ESP8266 @ 192.168.0.122) - v1.1.0, memory leak fixes
 - **Main Cottage** (ESP8266 @ 192.168.0.139) - v1.1.0, memory leak fixes
 - **Small Garage** (ESP32 @ 192.168.0.176) - v1.1.0, OLED display, memory leak fixes
-- **Spa** (ESP32 @ 192.168.0.196) - v1.1.0, memory leak + deep sleep fixes
-- **Sauna** (ESP32 @ 192.168.0.135) - v1.1.0, memory leak + deep sleep fixes
+- **Spa** (ESP32 @ 192.168.0.196) - v1.1.0, memory leak + deep sleep fixes (ready for v1.1.1)
+- **Sauna** (ESP32 @ 192.168.0.135) - v1.1.0, memory leak + deep sleep fixes (ready for v1.1.1)
 - **Mobile Temp Sensor** (ESP8266) - v1.1.0, memory leak fixes
 - **Big Garage** (ESP32) - Pending update, MQTT active
 - **Temp Sensor** (Unknown platform) - Pending update, MQTT active
 
-### Update Status (Dec 23, 2025)
-- ✅ **6 devices updated to v1.1.0-build20251223** - Memory leak fixes deployed
-- ✅ **Critical fixes**: DoubleResetDetector heap→stack, String→char[] conversions
+### Update Status (Dec 24, 2025)
+- ✅ **v1.1.1-build20251224** - Smart WiFi retry for deep sleep devices (ready to deploy)
+- ✅ **v1.1.0-build20251223** - Memory leak fixes deployed to 6 devices
+- ✅ **Critical fixes**: Smart WiFi retry prevents battery drain, DoubleResetDetector heap→stack, String→char[] conversions
 - ✅ **ESP32 deep sleep**: WiFi/MQTT disconnect + 2s command window fixes
 - ⏳ **2 devices pending**: Big Garage, Temp Sensor (require serial access)
 
-**Recent Critical Fixes (v1.1.0)**:
-- **Memory leak elimination**: ~100+ bytes/boot saved (DoubleResetDetector stack allocation)
-- **Heap fragmentation fix**: String operations replaced with snprintf()
-- **ESP32 deep sleep**: Fixed wake-up and remote configuration via MQTT
-- **MQTT reconnection**: Simplified 12-hour timeout bug (fixed in v1.0.3)
+**Recent Critical Fixes**:
+- **v1.1.1 - Smart WiFi Retry**: Deep sleep devices retry WiFi 3x without starting captive portal, conserving battery on transient failures
+- **v1.1.0 - Memory leak elimination**: ~100+ bytes/boot saved (DoubleResetDetector stack allocation)
+- **v1.1.0 - Heap fragmentation fix**: String operations replaced with snprintf()
+- **v1.1.0 - ESP32 deep sleep**: Fixed wake-up and remote configuration via MQTT
+- **v1.0.3 - MQTT reconnection**: Simplified 12-hour timeout bug
 - **Platform support**: MQTT_MAX_PACKET_SIZE=2048 (ESP32), 512 (ESP8266)
 
 ---
