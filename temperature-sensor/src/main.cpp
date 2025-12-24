@@ -758,21 +758,6 @@ void setupWebServer() {
 void setupWiFi() {
   // Double Reset Detector already initialized globally (no memory leak)
 
-  // Create WiFiManager instance
-  WiFiManager wm;
-
-  // Set custom AP name based on device location
-  String apName = String(deviceName);
-  apName.replace(" ", "-");
-  apName = "Temp-" + apName + "-Setup";
-
-  // Create custom parameter for device name (must persist throughout function)
-  WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
-  wm.addParameter(&custom_device_name);
-
-  // Don't use timeout - keep retrying forever in weak WiFi zones
-  wm.setConnectTimeout(0);
-  
   // Enable WiFi power save mode (modem sleep) for low power operation
   #ifdef ESP32
     WiFi.setSleep(true);
@@ -781,7 +766,7 @@ void setupWiFi() {
     WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
   #endif
   Serial.println("[POWER] WiFi modem sleep enabled");
-  
+
   WiFi.mode(WIFI_STA);
   // Enable auto-reconnect and persist credentials (low-power friendly)
   #ifdef ESP8266
@@ -791,8 +776,8 @@ void setupWiFi() {
     // ESP32 also supports auto reconnect in Arduino core
     WiFi.setAutoReconnect(true);
   #endif
-  
-  // Check for double reset - enter config portal if detected
+
+  // Check for double reset - always enter config portal if detected
   if (drd.detectDoubleReset()) {
     Serial.println();
     Serial.println("========================================");
@@ -800,11 +785,20 @@ void setupWiFi() {
     Serial.println("  Starting WiFi Configuration Portal");
     Serial.println("========================================");
     Serial.println();
+
+    WiFiManager wm;
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "Temp-" + apName + "-Setup";
+
     Serial.println("[WiFi] Connect to AP: " + apName);
     Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
     Serial.println();
 
-    // Set save config callback to save device name
+    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+    wm.addParameter(&custom_device_name);
+    wm.setConnectTimeout(0);
+
     bool shouldSaveConfig = false;
     wm.setSaveConfigCallback([&shouldSaveConfig](){
       Serial.println("[Config] Configuration saved, will update device name...");
@@ -817,7 +811,6 @@ void setupWiFi() {
       delay(3000);
       ESP.restart();
     } else {
-      // Save the device name if config was saved
       if (shouldSaveConfig) {
         const char* newName = custom_device_name.getValue();
         Serial.print("[Config] New device name: ");
@@ -826,8 +819,7 @@ void setupWiFi() {
         strcpy(deviceName, newName);
         updateTopicBase();
         saveDeviceName(deviceName);
-        
-        // Log configuration change with details
+
         if (oldName != String(newName)) {
           publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
         } else {
@@ -835,48 +827,125 @@ void setupWiFi() {
         }
       }
     }
-  } else {
-    Serial.println("[WiFi] Normal boot - attempting connection...");
-    // Removed verbose double-reset message to reduce logging
+    return;  // Exit early after portal configuration
+  }
 
-    // Set save config callback for autoConnect mode
+  // Normal boot: attempt WiFi connection with retry logic
+  Serial.println("[WiFi] Normal boot - attempting connection...");
+
+  // Check if we have saved credentials
+  if (WiFi.SSID().length() == 0) {
+    Serial.println("[WiFi] No saved credentials found");
+
+    // For deep sleep devices, skip portal and go to sleep - will retry on next wake
+    if (deepSleepSeconds > 0) {
+      Serial.println("[WiFi] Deep sleep enabled - will retry on next wake cycle");
+      Serial.println("[WiFi] Tip: Double-tap reset button to configure WiFi");
+      return;
+    }
+
+    // For non-deep-sleep devices, start config portal
+    Serial.println("[WiFi] Starting configuration portal...");
+    WiFiManager wm;
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "Temp-" + apName + "-Setup";
+
+    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+    wm.addParameter(&custom_device_name);
+    wm.setConnectTimeout(0);
+
     bool shouldSaveConfig = false;
     wm.setSaveConfigCallback([&shouldSaveConfig](){
-      Serial.println("[Config] Configuration saved, will update device name...");
       shouldSaveConfig = true;
     });
 
-    if (!wm.autoConnect(apName.c_str())) {
-      Serial.println("[WiFi] Failed to connect - running in offline mode");
-      // Removed verbose double-reset message to reduce logging
-    } else if (shouldSaveConfig) {
-      // Save the device name if config was saved
+    if (wm.autoConnect(apName.c_str()) && shouldSaveConfig) {
       const char* newName = custom_device_name.getValue();
-      Serial.print("[Config] New device name: ");
-      Serial.println(newName);
+      strcpy(deviceName, newName);
+      updateTopicBase();
+      saveDeviceName(deviceName);
+    }
+    return;
+  }
+
+  // We have saved credentials - attempt connection with retries
+  Serial.printf("[WiFi] Connecting to saved network: %s\n", WiFi.SSID().c_str());
+
+  // For deep sleep devices: retry without starting portal on failure
+  if (deepSleepSeconds > 0) {
+    const int MAX_RETRIES = 3;
+    const unsigned long RETRY_TIMEOUT_MS = 10000;  // 10 seconds per attempt
+
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      Serial.printf("[WiFi] Connection attempt %d/%d...\n", attempt, MAX_RETRIES);
+
+      WiFi.begin();  // Use saved credentials
+
+      unsigned long startAttempt = millis();
+      while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < RETRY_TIMEOUT_MS) {
+        delay(100);
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[WiFi] Connected! IP: %s, RSSI: %d dBm\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
+        return;
+      }
+
+      Serial.printf("[WiFi] Attempt %d failed (status: %d)\n", attempt, WiFi.status());
+
+      if (attempt < MAX_RETRIES) {
+        Serial.println("[WiFi] Retrying...");
+        WiFi.disconnect();
+        delay(2000);  // Wait before retry
+      }
+    }
+
+    // All retries failed - don't start portal, will retry on next wake
+    Serial.println("[WiFi] All connection attempts failed");
+    Serial.println("[WiFi] Battery-powered device - skipping portal to conserve power");
+    Serial.println("[WiFi] Will retry on next wake cycle");
+    Serial.println("[WiFi] Tip: Double-tap reset button if you need to reconfigure WiFi");
+    return;
+  }
+
+  // For non-deep-sleep devices: use WiFiManager with portal fallback
+  WiFiManager wm;
+  String apName = String(deviceName);
+  apName.replace(" ", "-");
+  apName = "Temp-" + apName + "-Setup";
+
+  WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+  wm.addParameter(&custom_device_name);
+  wm.setConnectTimeout(0);
+
+  bool shouldSaveConfig = false;
+  wm.setSaveConfigCallback([&shouldSaveConfig](){
+    shouldSaveConfig = true;
+  });
+
+  if (!wm.autoConnect(apName.c_str())) {
+    Serial.println("[WiFi] Failed to connect - running in offline mode");
+  } else {
+    Serial.printf("[WiFi] Connected to %s, IP: %s, RSSI: %d dBm\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
+
+    if (shouldSaveConfig) {
+      const char* newName = custom_device_name.getValue();
       String oldName = String(deviceName);
       strcpy(deviceName, newName);
       updateTopicBase();
       saveDeviceName(deviceName);
-      
-      // Log configuration change with details
+
       if (oldName != String(newName)) {
         publishEvent("device_configured", "Name: '" + oldName + "' -> '" + String(newName) + "', SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString(), "info");
       } else {
         publishEvent("device_configured", "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString() + ", Name unchanged: " + oldName, "info");
       }
     }
-  }
-
-  // Print connection status - simplified
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[WiFi] Connected to %s, IP: %s, RSSI: %d dBm\n",
-                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    
-    // Log WiFi connection event
-    publishEvent("wifi_connected", "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString(), "info");
-  } else {
-    Serial.println("[WiFi] Not connected - running in offline mode");
   }
 }
 
