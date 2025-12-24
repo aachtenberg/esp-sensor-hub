@@ -37,8 +37,8 @@
 #define DRD_TIMEOUT 3           // Seconds to wait for second reset
 #define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
 
-// Create Double Reset Detector instance
-DoubleResetDetector* drd;
+// Create Double Reset Detector instance (stack allocation, no memory leak)
+DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 
 // Device name storage
 char deviceName[40] = "Temp Sensor";  // Default name
@@ -76,6 +76,9 @@ DeviceMetrics metrics;
 // Deep sleep configuration
 int deepSleepSeconds = 0;  // Default disabled
 const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
+
+// Track if we just woke from deep sleep to prevent immediate re-sleep
+bool justWokeFromSleep = false;
 
 // Data wire is connected to GPIO 4
 OneWire oneWire(ONE_WIRE_PIN);
@@ -240,7 +243,7 @@ String sanitizeDeviceName(const char* name);
 void updateTopicBase();
 bool ensureMqttConnected();
 void publishEvent(const String& eventType, const String& message, const String& severity = "info");
-void publishTemperature();
+bool publishTemperature();
 void publishStatus();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
@@ -492,11 +495,11 @@ void publishEvent(const String& eventType, const String& message, const String& 
   publishJson(getTopicEvents(), doc, false);
 }
 
-void publishTemperature() {
+bool publishTemperature() {
   if (!isValidTemperature(temperatureC)) {
-    return;
+    return false;
   }
-  
+
   StaticJsonDocument<256> doc;
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
@@ -513,7 +516,7 @@ void publishTemperature() {
   doc["timestamp"] = millis() / 1000;
   doc["celsius"] = temperatureC.toFloat();
   doc["fahrenheit"] = temperatureF.toFloat();
-  publishJson(getTopicTemperature(), doc, false);
+  return publishJson(getTopicTemperature(), doc, false);
 }
 
 void publishStatus() {
@@ -544,6 +547,14 @@ void publishStatus() {
 
 // Enter deep sleep if configured
 void enterDeepSleepIfEnabled() {
+  // Check if deep sleep is disabled at compile time (e.g., for ESP8266 without GPIO16→RST wiring)
+  #ifdef DISABLE_DEEP_SLEEP
+    if (deepSleepSeconds > 0) {
+      Serial.println("[DEEP SLEEP] Deep sleep is disabled on this device (DISABLE_DEEP_SLEEP flag set)");
+    }
+    return;
+  #endif
+
   if (deepSleepSeconds > 0) {
     Serial.println();
     Serial.println("========================================");
@@ -559,18 +570,33 @@ void enterDeepSleepIfEnabled() {
       Serial.println("*** END HARDWARE REQUIREMENT ***");
       Serial.println();
     #endif
-    publishEvent("deep_sleep", "Entering deep sleep for " + String(deepSleepSeconds) + " seconds", "info");
+    #ifdef ESP32
+      Serial.println("[DEEP SLEEP] ESP32 RTC timer configured - no hardware mods needed");
 
-    // Give MQTT time to send the message
-    mqttClient.loop();
-    delay(100);
+      // Disconnect MQTT and WiFi before deep sleep
+      Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
+      if (mqttClient.connected()) {
+        mqttClient.disconnect();
+      }
+      WiFi.disconnect(true);  // true = turn off WiFi radio
+      delay(100);  // Give time for disconnect to complete
+    #endif
+
+    // Flush serial before sleeping
+    Serial.flush();
+    delay(50);
 
 #ifdef ESP8266
     // ESP8266 deep sleep with timer requires GPIO 16 (D0) connected to RST pin
     // For proper wake-up: RST -> 10K resistor -> GPIO 16, with 0.1µF capacitor RST->GND
     ESP.deepSleep(deepSleepSeconds * 1000000ULL); // microseconds
 #else // ESP32
-    esp_sleep_enable_timer_wakeup(deepSleepSeconds * 1000000ULL);
+    // ESP32 has built-in RTC - no hardware modifications needed
+    uint64_t sleepTime = deepSleepSeconds * 1000000ULL;
+    Serial.printf("[DEEP SLEEP] Configuring RTC timer for %llu microseconds\n", sleepTime);
+    esp_sleep_enable_timer_wakeup(sleepTime);
+    Serial.println("[DEEP SLEEP] Starting deep sleep NOW...");
+    Serial.flush();
     esp_deep_sleep_start();
 #endif
   }
@@ -664,8 +690,14 @@ void handleDeepSleepPost() {
     if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
       deepSleepSeconds = newSeconds;
       saveDeepSleepConfig();
-      publishEvent("deep_sleep_config", "Deep sleep set to " + String(deepSleepSeconds) + " seconds", "info");
-      server.send(200, "application/json", "{\"status\":\"ok\",\"deep_sleep_seconds\":" + String(deepSleepSeconds) + "}");
+
+      char msg[64];
+      snprintf(msg, sizeof(msg), "Deep sleep set to %d seconds", deepSleepSeconds);
+      publishEvent("deep_sleep_config", msg, "info");
+
+      char response[64];
+      snprintf(response, sizeof(response), "{\"status\":\"ok\",\"deep_sleep_seconds\":%d}", deepSleepSeconds);
+      server.send(200, "application/json", response);
     } else {
       server.send(400, "application/json", "{\"error\":\"Invalid seconds value (0-3600)\"}");
     }
@@ -675,30 +707,34 @@ void handleDeepSleepPost() {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String topicStr = String(topic);
-  String payloadStr;
-  for (unsigned int i = 0; i < length; i++) {
-    payloadStr += (char)payload[i];
-  }
+  // Use char arrays instead of String to avoid heap fragmentation
+  char payloadStr[64];
+  unsigned int copyLen = min(length, sizeof(payloadStr) - 1);
+  memcpy(payloadStr, payload, copyLen);
+  payloadStr[copyLen] = '\0';
 
-  Serial.printf("[MQTT] Received command: %s = %s\n", topicStr.c_str(), payloadStr.c_str());
+  Serial.printf("[MQTT] Received command: %s = %s\n", topic, payloadStr);
 
   // Handle deep sleep configuration commands
-  if (topicStr.endsWith("/command")) {
-    if (payloadStr.startsWith("deepsleep ")) {
-      String secondsStr = payloadStr.substring(10); // Remove "deepsleep " prefix
-      int newSeconds = secondsStr.toInt();
+  if (strstr(topic, "/command") != NULL) {
+    if (strncmp(payloadStr, "deepsleep ", 10) == 0) {
+      int newSeconds = atoi(payloadStr + 10); // Parse number after "deepsleep "
       if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
         deepSleepSeconds = newSeconds;
         saveDeepSleepConfig();
-        publishEvent("deep_sleep_config", "Deep sleep set to " + String(deepSleepSeconds) + " seconds via MQTT", "info");
+
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Deep sleep set to %d seconds via MQTT", deepSleepSeconds);
+        publishEvent("deep_sleep_config", msg, "info");
         publishStatus(); // Publish updated status
       } else {
-        publishEvent("command_error", "Invalid deep sleep seconds: " + secondsStr, "error");
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Invalid deep sleep seconds: %d", newSeconds);
+        publishEvent("command_error", msg, "error");
       }
-    } else if (payloadStr == "status") {
+    } else if (strcmp(payloadStr, "status") == 0) {
       publishStatus();
-    } else if (payloadStr == "restart") {
+    } else if (strcmp(payloadStr, "restart") == 0) {
       publishEvent("device_restart", "Restarting device via MQTT command", "warning");
       delay(500);
       ESP.restart();
@@ -720,8 +756,7 @@ void setupWebServer() {
 }
 
 void setupWiFi() {
-  // Initialize Double Reset Detector
-  drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
+  // Double Reset Detector already initialized globally (no memory leak)
 
   // Create WiFiManager instance
   WiFiManager wm;
@@ -758,7 +793,7 @@ void setupWiFi() {
   #endif
   
   // Check for double reset - enter config portal if detected
-  if (drd->detectDoubleReset()) {
+  if (drd.detectDoubleReset()) {
     Serial.println();
     Serial.println("========================================");
     Serial.println("  DOUBLE RESET DETECTED");
@@ -872,6 +907,9 @@ void setup() {
     Serial.println(ESP.getResetReason());
     Serial.print("[DEBUG] Free heap: ");
     Serial.println(ESP.getFreeHeap());
+  #else
+    Serial.printf("[DEBUG] Reset reason code: 0x%02x\n", esp_reset_reason());
+    Serial.printf("[DEBUG] Free heap: %u bytes\n", ESP.getFreeHeap());
   #endif
 
   Serial.println();
@@ -879,6 +917,59 @@ void setup() {
   Serial.println("     Temperature Sensor");
   Serial.println("========================================");
   Serial.println();
+
+  // Detect wake from deep sleep
+  #ifdef ESP32
+    esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+    switch (wakeupCause) {
+      case ESP_SLEEP_WAKEUP_TIMER:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (TIMER) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_GPIO:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (GPIO) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_UART:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (UART) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_TOUCHPAD:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (TOUCHPAD) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_EXT0:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (EXT0) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_EXT1:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (EXT1) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      case ESP_SLEEP_WAKEUP_COCPU:
+        Serial.println();
+        Serial.println("  *** WOKE FROM DEEP SLEEP (COCPU) ***");
+        Serial.println();
+        justWokeFromSleep = true;
+        break;
+      default:
+        // Normal boot, not a wake-up
+        justWokeFromSleep = false;
+        break;
+    }
+  #endif
 
   // Load device name from filesystem
   loadDeviceName();
@@ -914,6 +1005,50 @@ void setup() {
   // Connect to WiFi
   setupWiFi();
 
+  // If deep sleep is enabled, skip OTA/web server setup and publish immediately
+  if (deepSleepSeconds > 0) {
+    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - skipping OTA and web server");
+
+    // Ensure MQTT is connected before publishing
+    if (!ensureMqttConnected()) {
+      Serial.println("[DEEP SLEEP] MQTT connection failed - staying awake to retry");
+      lastPublishTime = millis();
+      return;
+    }
+
+    // Read temperature before publishing
+    updateTemperatures();
+
+    // Publish immediately
+    bool publishSuccess = publishTemperature();
+    publishStatus();
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("     Setup Complete (Deep Sleep Mode)");
+    Serial.println("========================================");
+    Serial.println();
+
+    // Wait briefly to process any incoming MQTT commands (e.g., to disable deep sleep)
+    Serial.println("[DEEP SLEEP] Waiting 2 seconds for MQTT commands...");
+    unsigned long commandWaitStart = millis();
+    while (millis() - commandWaitStart < 2000) {
+      mqttClient.loop();  // Process incoming MQTT messages
+      delay(10);
+    }
+
+    // Enter deep sleep immediately if publish succeeded
+    if (publishSuccess) {
+      enterDeepSleepIfEnabled();
+    } else {
+      Serial.println("[DEEP SLEEP] Initial publish failed - staying awake to retry");
+    }
+    // If we reach here, publish failed and we'll retry in loop()
+    lastPublishTime = millis();
+    return;
+  }
+
+  // Normal operation mode (deep sleep disabled)
   // Setup OTA updates (after WiFi is connected)
   if (WiFi.status() == WL_CONNECTED) {
     setupOTA();
@@ -949,7 +1084,7 @@ void setup() {
 
 void loop() {
   // Must call drd->loop() to keep double reset detection working
-  drd->loop();
+  drd.loop();
 
   // Handle web requests first for responsiveness
   server.handleClient();
@@ -1050,17 +1185,21 @@ void loop() {
     
     updateTemperatures();
     yield(); // Feed watchdog between operations
-    
+
     #ifdef BATTERY_MONITOR_ENABLED
       readBattery();
     #endif
-    
-    publishTemperature();
+
+    bool publishSuccess = publishTemperature();
     publishStatus();
     lastPublishTime = now;
 
-    // Enter deep sleep if configured (after successful publish)
-    enterDeepSleepIfEnabled();
+    // Only enter deep sleep if temperature was published successfully
+    if (publishSuccess) {
+      enterDeepSleepIfEnabled();
+    } else {
+      Serial.println("[DEEP SLEEP] Skipping deep sleep - publish failed, will retry");
+    }
   }
 
   // Periodic status heartbeat (helps diagnose connectivity)

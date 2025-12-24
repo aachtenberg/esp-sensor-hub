@@ -44,8 +44,10 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
 // Enable battery power profile (disables HTTP server, gates OLED)
 #define BATTERY_POWERED
 
-// Headless battery node: disable OLED hardware (stubs will no-op)
-#define OLED_ENABLED 0
+// OLED display: enabled via build flag for specific devices (default disabled for battery saving)
+#ifndef OLED_ENABLED
+  #define OLED_ENABLED 0
+#endif
 
 // Enable HTTP API endpoints (JSON only, no HTML dashboard) for remote battery monitoring
 #define API_ENDPOINTS_ONLY
