@@ -485,6 +485,171 @@ pio run -e esp32dev -t upload
 **Status**: Active, required for all new builds
 
 
-### Surviellance-arduino project
+### Surveillance-arduino project
 # use the Arduino project for all new work
 # read and build according to ARDUINO_CLI_SETUP.md instructions and BUILD_SYSTEMS.md instructions
+
+---
+
+## ESP32 Deep Sleep Mode (December 2025)
+
+**ESP32 devices support battery-powered deep sleep mode with automatic wake cycles**. This is critical for remote, battery-powered temperature sensors.
+
+### Critical Implementation Requirements
+
+**Two fixes required for ESP32 deep sleep to work**:
+
+1. **WiFi/MQTT Disconnect Before Sleep** ([main.cpp:576-582](../temperature-sensor/src/main.cpp#L576-L582))
+   - Must call `WiFi.disconnect(true)` and `mqttClient.disconnect()` before `esp_deep_sleep_start()`
+   - Without this, RTC timer may not properly configure or wake device
+   - Device will enter deep sleep but **never wake** from timer
+
+2. **MQTT Command Processing Window** ([main.cpp:1023-1029](../temperature-sensor/src/main.cpp#L1023-L1029))
+   - Must add 2-second `mqttClient.loop()` delay after publishing before entering sleep
+   - Allows device to receive and process MQTT commands during wake cycle
+   - Without this, remote configuration via MQTT is **impossible**
+
+### Implementation Pattern
+
+```cpp
+void enterDeepSleepIfEnabled() {
+  if (deepSleepSeconds > 0) {
+    #ifdef ESP32
+      // CRITICAL: Disconnect WiFi/MQTT before sleep
+      Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
+      if (mqttClient.connected()) {
+        mqttClient.disconnect();
+      }
+      WiFi.disconnect(true);  // true = turn off WiFi radio
+      delay(100);
+    #endif
+
+    Serial.flush();
+    delay(50);
+
+    #ifdef ESP32
+      uint64_t sleepTime = deepSleepSeconds * 1000000ULL;
+      esp_sleep_enable_timer_wakeup(sleepTime);
+      esp_deep_sleep_start();
+    #endif
+  }
+}
+```
+
+```cpp
+void setup() {
+  // ... WiFi and MQTT connection ...
+
+  if (deepSleepSeconds > 0) {
+    // Skip OTA/web server in deep sleep mode
+    updateTemperatures();
+    publishTemperature();
+    publishStatus();
+
+    // CRITICAL: Wait for MQTT commands before sleeping
+    Serial.println("[DEEP SLEEP] Waiting 2 seconds for MQTT commands...");
+    unsigned long commandWaitStart = millis();
+    while (millis() - commandWaitStart < 2000) {
+      mqttClient.loop();  // Process incoming MQTT messages
+      delay(10);
+    }
+
+    // Now safe to enter deep sleep
+    enterDeepSleepIfEnabled();
+  }
+}
+```
+
+### Deep Sleep Behavior
+
+**When enabled** (`deepSleepSeconds > 0`):
+1. Device wakes from RTC timer
+2. Connects to WiFi and MQTT (2-3 seconds)
+3. Publishes temperature and status
+4. **Waits 2 seconds** processing MQTT commands
+5. Disconnects WiFi/MQTT cleanly
+6. Enters deep sleep
+7. **No web server** or OTA during sleep cycles
+
+**Power Profile**:
+- Active: ~80mA for 4-6 seconds
+- Sleep: ~10µA
+- Average (30s cycle): ~3mA
+
+### Remote Configuration via MQTT
+
+**Available Commands**:
+```bash
+# Enable deep sleep (30 seconds)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "deepsleep 30"
+
+# Disable deep sleep
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "deepsleep 0"
+
+# Restart device
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "restart"
+
+# Request status
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "status"
+```
+
+**MQTT Topics**:
+- Command: `esp-sensor-hub/{DEVICE}/command`
+- Status: `esp-sensor-hub/{DEVICE}/status`
+- Events: `esp-sensor-hub/{DEVICE}/events`
+- Temperature: `esp-sensor-hub/{DEVICE}/temperature`
+
+### Troubleshooting
+
+**Device won't wake from deep sleep**:
+- Missing WiFi/MQTT disconnect before `esp_deep_sleep_start()`
+- Check serial for: `[DEEP SLEEP] Disconnecting MQTT and WiFi...`
+- Monitor MQTT for temperature publishes (proves wake cycles work)
+- Solution: Add disconnect calls before sleep
+
+**Cannot configure device remotely**:
+- Missing `mqttClient.loop()` processing window after wake
+- Commands sent but device sleeps before processing
+- Check serial for: `[DEEP SLEEP] Waiting 2 seconds for MQTT commands...`
+- Solution: Add 2-second loop delay before entering sleep
+
+**Configuration not persisting**:
+- Deep sleep config saves to SPIFFS/LittleFS
+- Survives firmware updates (unless filesystem erased)
+- Requires device restart to take effect
+- Use MQTT `restart` command after configuration change
+
+### ESP8266 Limitations
+
+**ESP8266 deep sleep is DISABLED by default** (`DISABLE_DEEP_SLEEP=1` in platformio.ini):
+- Requires GPIO 16 → RST hardware modification
+- Without modification, device enters permanent sleep
+- Do NOT enable deep sleep on ESP8266 without hardware mod
+- See CONFIG.md for required circuit diagram
+
+### Files to Reference
+
+- **Implementation**: `temperature-sensor/src/main.cpp`
+  - Deep sleep entry: `enterDeepSleepIfEnabled()` (lines 548-603)
+  - MQTT processing: `setup()` deep sleep branch (lines 1023-1036)
+- **Configuration**: `temperature-sensor/platformio.ini`
+  - ESP8266: `-D DISABLE_DEEP_SLEEP=1`
+  - ESP32: No flag (deep sleep available)
+- **Documentation**: `docs/reference/CONFIG.md`
+  - Complete deep sleep section with all commands
+  - Troubleshooting procedures
+  - Power consumption details
+
+### Verification Steps
+
+1. Enable deep sleep: `mosquitto_pub -h BROKER -t "esp-sensor-hub/Spa/command" -m "deepsleep 30"`
+2. Watch events: `mosquitto_sub -h BROKER -t "esp-sensor-hub/Spa/events" -v`
+3. Confirm message: `{"event":"deep_sleep_config","message":"Deep sleep set to 30 seconds via MQTT"}`
+4. Monitor wake cycles: `mosquitto_sub -h BROKER -t "esp-sensor-hub/Spa/#" -v`
+5. See temperature publishes every ~30 seconds
+6. Check serial output for: `*** WOKE FROM DEEP SLEEP (TIMER) ***`
+
+**Issue Discovered**: December 23, 2025
+**Root Causes**: Missing WiFi disconnect, missing MQTT command processing
+**Status**: Fixed, tested, documented
+**Platforms**: ESP32 only (ESP8266 disabled by default)

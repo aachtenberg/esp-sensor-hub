@@ -171,12 +171,134 @@ from(bucket: "sensor_data")
 
 **Recovery**: Replace DS18B20 sensor or fix wiring - device firmware is correct
 
+### Deep Sleep Mode (ESP32 Only)
+
+**ESP32 devices support automatic deep sleep mode for battery-powered operation**. ESP8266 devices do NOT support deep sleep due to hardware requirements (see below).
+
+#### ESP32 Deep Sleep Configuration
+
+**Enable via HTTP API** (device must be awake):
+```bash
+# Enable 30-second deep sleep cycle
+curl -X POST "http://DEVICE_IP/deepsleep?seconds=30"
+
+# Disable deep sleep (0 seconds)
+curl -X POST "http://DEVICE_IP/deepsleep?seconds=0"
+```
+
+**Enable via MQTT** (works while device is sleeping):
+```bash
+# Enable 30-second deep sleep
+mosquitto_pub -h YOUR_MQTT_BROKER -t "esp-sensor-hub/DEVICE_NAME/command" -m "deepsleep 30"
+
+# Disable deep sleep
+mosquitto_pub -h YOUR_MQTT_BROKER -t "esp-sensor-hub/DEVICE_NAME/command" -m "deepsleep 0"
+
+# Device responds with confirmation event:
+# {"event":"deep_sleep_config","message":"Deep sleep set to 30 seconds via MQTT"}
+```
+
+#### Deep Sleep Behavior
+
+When deep sleep is enabled (non-zero value):
+1. Device wakes from deep sleep
+2. Connects to WiFi and MQTT
+3. Publishes temperature and status
+4. **Waits 2 seconds** to process incoming MQTT commands
+5. Enters deep sleep for configured duration
+6. **No web server** - HTTP endpoints not available during deep sleep cycles
+7. **MQTT commands only** - use MQTT to change configuration remotely
+
+**Power Consumption**:
+- Active (WiFi/MQTT): ~80mA for 4-6 seconds
+- Deep sleep: ~10µA
+- With 30-second cycle: Average ~3mA (excellent for battery operation)
+
+#### Remote Management via MQTT
+
+**Available MQTT Commands** (during 2-second wake window):
+```bash
+# Configure deep sleep interval (0-3600 seconds)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "deepsleep 30"
+
+# Request status update
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "status"
+
+# Restart device
+mosquitto_pub -h BROKER -t "esp-sensor-hub/DEVICE/command" -m "restart"
+```
+
+**MQTT Command Topics**:
+- Command topic: `esp-sensor-hub/DEVICE_NAME/command`
+- Status topic: `esp-sensor-hub/DEVICE_NAME/status`
+- Events topic: `esp-sensor-hub/DEVICE_NAME/events`
+- Temperature topic: `esp-sensor-hub/DEVICE_NAME/temperature`
+
+#### Wake Cycle Monitoring
+
+**Monitor device wake/sleep cycles**:
+```bash
+# Subscribe to all device messages
+mosquitto_sub -h BROKER -t "esp-sensor-hub/DEVICE/#" -v
+
+# Watch for wake cycles (status messages every 30s)
+mosquitto_sub -h BROKER -t "esp-sensor-hub/DEVICE/status" -v
+
+# Monitor configuration changes
+mosquitto_sub -h BROKER -t "esp-sensor-hub/DEVICE/events" -v | grep "deep_sleep"
+```
+
+**Example wake cycle log**:
+```
+esp-sensor-hub/Spa/events {"event":"wifi_connected","uptime_seconds":3}
+esp-sensor-hub/Spa/temperature {"celsius":18.25,"fahrenheit":64.85}
+esp-sensor-hub/Spa/status {"uptime_seconds":4,"deep_sleep_seconds":30}
+[Device enters deep sleep for 30 seconds]
+[Device wakes from RTC timer]
+esp-sensor-hub/Spa/events {"event":"wifi_connected","uptime_seconds":2}
+...
+```
+
+#### Troubleshooting Deep Sleep
+
+**Device won't wake from deep sleep**:
+1. Check serial output shows: `*** WOKE FROM DEEP SLEEP (TIMER) ***`
+2. Verify WiFi/MQTT disconnect before sleep: `[DEEP SLEEP] Disconnecting MQTT and WiFi...`
+3. Confirm RTC timer configured: `[DEEP SLEEP] Configuring RTC timer for X microseconds`
+4. Monitor MQTT for temperature messages (proves device is waking)
+5. If stuck sleeping, manually reset device
+
+**Cannot disable deep sleep remotely**:
+1. Device must process MQTT commands during 2-second wake window
+2. Send command multiple times (every 2 seconds) to catch wake cycle
+3. Monitor events topic for confirmation: `"event":"deep_sleep_config"`
+4. If unable to catch window, physically reset device and use HTTP API
+
+**Deep sleep configuration not persisting**:
+1. Configuration saves to SPIFFS/LittleFS filesystem
+2. Survives firmware updates (unless filesystem is erased)
+3. Verify with: `curl http://DEVICE_IP/health | jq '.deep_sleep_seconds'`
+4. Change requires device restart to take effect from setup()
+
+#### ESP32 Technical Details
+
+**Implementation** ([main.cpp:576-600](../temperature-sensor/src/main.cpp#L576-L600)):
+- Disconnects WiFi and MQTT before entering deep sleep
+- Uses ESP32 RTC timer for wake-up (no hardware modifications needed)
+- 2-second MQTT command processing window after wake
+- Skips OTA/web server setup in deep sleep mode for minimal wake time
+
+**Critical fix** (Dec 23, 2025):
+- Added WiFi/MQTT disconnect before `esp_deep_sleep_start()`
+- Added 2-second `mqttClient.loop()` to process incoming commands
+- Without these, RTC timer may not wake device or commands are ignored
+
 ### ESP8266 Deep Sleep Hardware Requirement
-**Critical**: ESP8266 deep sleep requires hardware modification for timer wake-up
+**IMPORTANT**: ESP8266 deep sleep is **disabled by default** via `DISABLE_DEEP_SLEEP=1` flag in platformio.ini
 
 **Symptom**: Device enters deep sleep but never wakes up (permanent sleep)
 
-**Root Cause**: ESP8266 timer wake-up requires GPIO 16 connected to RST pin
+**Root Cause**: ESP8266 timer wake-up requires GPIO 16 physically connected to RST pin
 
 **Required Hardware Modification**:
 ```
@@ -191,12 +313,13 @@ ESP8266 RST pin ──► 10KΩ resistor ──► ESP8266 GPIO 16 (D0)
 - GPIO 16 is the only pin that can be used for this purpose
 - Without this connection, device sleeps forever
 
-**Implementation**:
-- Connect RST to GPIO 16 via 10KΩ resistor (prevents short circuit)
-- Add 0.1µF capacitor from GPIO 16 to GND (debouncing)
-- Device will show warning in serial: `GPIO 16 must be connected to RST for wake-up`
+**Implementation** (if hardware modification is complete):
+1. Remove `DISABLE_DEEP_SLEEP=1` from `platformio.ini` ESP8266 environment
+2. Rebuild and flash firmware
+3. Device will show warning in serial: `GPIO 16 must be connected to RST for wake-up`
+4. Enable deep sleep via HTTP or MQTT (same commands as ESP32)
 
-**Testing**: After hardware mod, device will wake up reliably from deep sleep
+**Default Configuration**: ESP8266 deep sleep is **disabled** to prevent permanent sleep on unmodified hardware
 
 ### ESP8266/ESP32 MQTT 12-Hour Reconnection Timeout
 **Symptom**: Devices lose MQTT connection after 12+ hours of operation and never reconnect

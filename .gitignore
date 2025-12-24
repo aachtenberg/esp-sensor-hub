@@ -37,3 +37,6 @@ compile_commands.json
 
 # PCB design files
 docs/pcb_design/
+scripts/disable_sleep_and_upload.sh
+scripts/disable_sleep_mqtt.sh
+scripts/monitor_sleep_cycle.sh
