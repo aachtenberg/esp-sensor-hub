@@ -404,7 +404,8 @@ void gracefulMqttDisconnect() {
   // PubSubClient needs time to properly close the TCP connection
   unsigned long disconnectStart = millis();
   while (mqttClient.connected() && (millis() - disconnectStart) < 500) {
-    delay(10);
+    mqttClient.loop();  // Allow MQTT client to process disconnect
+    yield();  // Feed watchdog and allow background tasks
   }
   
   if (mqttClient.connected()) {
@@ -732,7 +733,8 @@ void handleDeepSleepPost() {
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Use char arrays instead of String to avoid heap fragmentation
-  char payloadStr[64];
+  // Buffer size increased to 128 bytes for future command extensions
+  char payloadStr[128];
   unsigned int copyLen = min(length, sizeof(payloadStr) - 1);
   memcpy(payloadStr, payload, copyLen);
   payloadStr[copyLen] = '\0';
@@ -744,6 +746,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strncmp(payloadStr, "deepsleep ", 10) == 0) {
       int newSeconds = atoi(payloadStr + 10); // Parse number after "deepsleep "
       if (newSeconds >= 0 && newSeconds <= 3600) { // Max 1 hour
+        // Warn about inefficient sleep intervals
+        if (newSeconds > 0 && newSeconds < 10) {
+          Serial.printf("[WARNING] Deep sleep interval %ds is very short - WiFi overhead may drain battery\n", newSeconds);
+          publishEvent("deep_sleep_warning", "Sleep interval < 10s causes excessive WiFi overhead", "warning");
+        }
         // Warn if OTA is active
         if (otaInProgress) {
           Serial.println("[WARNING] OTA upload in progress - ignoring deep sleep change");

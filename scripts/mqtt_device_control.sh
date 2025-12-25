@@ -99,10 +99,20 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -r|--retry)
+            # Validate as integer to prevent command injection
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: --retry must be a positive integer"
+                exit 1
+            fi
             MAX_ATTEMPTS="$2"
             shift 2
             ;;
         -i|--interval)
+            # Validate as integer to prevent command injection
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: --interval must be a positive integer"
+                exit 1
+            fi
             RETRY_INTERVAL="$2"
             shift 2
             ;;
@@ -202,7 +212,7 @@ send_command() {
         if [ "$infinite_retry" = "true" ]; then
             echo "[$timestamp] [Attempt $attempt] Sending: $mqtt_message"
         else
-            if [ $attempt -gt $MAX_ATTEMPTS ]; then
+            if [ "$attempt" -gt "$MAX_ATTEMPTS" ]; then
                 echo ""
                 echo "✗ No response after $MAX_ATTEMPTS attempts"
                 echo "Device may be in deep sleep. Try again or increase retry attempts."
@@ -226,7 +236,7 @@ send_command() {
             fi
         fi
 
-        sleep $RETRY_INTERVAL
+        sleep "$RETRY_INTERVAL"
     done
 }
 
