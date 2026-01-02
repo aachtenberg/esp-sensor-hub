@@ -25,16 +25,28 @@ Environmental monitoring sensor measuring temperature, humidity, and atmospheric
 - SSD1306 OLED display (I2C)
 - Voltage divider for battery monitoring (10K + 10K resistors)
 
-### Pinout (ESP32)
+### Pinout (ESP32 and ESP32-S3)
 
+**ESP32-S3 WROOM (GPIO 8/9)**
+```
+BME280 I2C:
+  SDA → GPIO 8 (I2C Data)
+  SCL → GPIO 9 (I2C Clock)
+  VCC → 3.3V
+  GND → GND
+```
+
+**ESP32 Standard (GPIO 21/22)**
 ```
 BME280 I2C:
   SDA → GPIO 21 (I2C Data)
   SCL → GPIO 22 (I2C Clock)
   VCC → 3.3V
   GND → GND
+```
 
-Battery Monitor (Optional):
+**Battery Monitor (Optional, both boards):**
+```
   Battery+ → 10K → GPIO 34 → 10K → GND
 ```
 
@@ -54,8 +66,15 @@ nano include/secrets.h
 
 ### 2. First Upload (USB)
 
+**ESP32-S3 WROOM**
 ```bash
-# Initial upload via USB serial (for battery mode, disable display)
+# Initial upload via USB serial for ESP32-S3
+pio run -e esp32s3-serial -t upload
+```
+
+**ESP32 Standard**
+```bash
+# Initial upload via USB serial for ESP32 (battery mode, no display)
 pio run -e esp32dev-battery-display-serial -t upload
 ```
 
@@ -68,6 +87,13 @@ Device will create WiFi access point:
 
 ### 4. Subsequent Uploads (OTA)
 
+**ESP32-S3 WROOM**
+```bash
+export PLATFORMIO_UPLOAD_FLAGS="--auth=YOUR_OTA_PASSWORD"
+pio run -e esp32s3 -t upload --upload-port 192.168.X.X
+```
+
+**ESP32 Standard**
 ```bash
 export PLATFORMIO_UPLOAD_FLAGS="--auth=YOUR_OTA_PASSWORD"
 pio run -e esp32dev-battery -t upload --upload-port 192.168.X.X
@@ -122,20 +148,33 @@ mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "deepsleep
 
 ## Platforms
 
+### esp32s3
+- ESP32-S3 WROOM with minimal power consumption
+- GPIO 8 (SDA), GPIO 9 (SCL) for BME280 I2C
+- CPU at 80 MHz, WiFi power save enabled
+- Suitable for 3.7V battery operation
+- No OLED display
+
+### esp32s3-serial
+- First-time USB programming for ESP32-S3
+- Higher upload speed (460800 baud)
+- Use before switching to OTA
+
 ### esp32dev-battery
-- ESP32 with minimal power consumption
+- Standard ESP32 with minimal power consumption
+- GPIO 21 (SDA), GPIO 22 (SCL) for BME280 I2C
 - CPU at 80 MHz, WiFi power save enabled
 - Suitable for 3.7V battery operation
 - No OLED display
 
 ### esp32dev-battery-display
-- ESP32 with OLED support
+- Standard ESP32 with OLED support
 - Same power optimizations as battery mode
 - OLED display optional at runtime
 - Higher memory requirements
 
 ### esp32dev-battery-display-serial
-- First-time USB programming
+- First-time USB programming for ESP32
 - Higher upload speed (460800 baud)
 - Use before switching to OTA
 

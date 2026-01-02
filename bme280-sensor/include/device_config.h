@@ -7,8 +7,16 @@
  */
 
 // BME280 I2C Configuration
-static const int BME280_I2C_SDA = 21;  // ESP32 SDA (GPIO 21)
-static const int BME280_I2C_SCL = 22;  // ESP32 SCL (GPIO 22)
+// Pin assignments vary by board:
+// - ESP32-S3 WROOM: SDA=GPIO 8, SCL=GPIO 9
+// - ESP32 (standard): SDA=GPIO 21, SCL=GPIO 22
+#if defined(ARDUINO_FREENOVE_ESP32_S3_WROOM) || defined(ESP32S3)
+  static const int BME280_I2C_SDA = 8;   // ESP32-S3 SDA
+  static const int BME280_I2C_SCL = 9;   // ESP32-S3 SCL
+#else
+  static const int BME280_I2C_SDA = 21;  // ESP32 SDA
+  static const int BME280_I2C_SCL = 22;  // ESP32 SCL
+#endif
 static const int BME280_I2C_ADDR = 0x77;  // Default I2C address (0x76 if SDO pulled low)
 
 // Device board type - Auto-detected from build environment
