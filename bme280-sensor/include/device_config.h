@@ -17,7 +17,7 @@
   static const int BME280_I2C_SDA = 21;  // ESP32 SDA
   static const int BME280_I2C_SCL = 22;  // ESP32 SCL
 #endif
-static const int BME280_I2C_ADDR = 0x77;  // Default I2C address (0x76 if SDO pulled low)
+static const int BME280_I2C_ADDR = 0x76;  // I2C address (0x76 if SDO low, 0x77 if SDO high)
 
 // Device board type - Auto-detected from build environment
 #if defined(ESP32S3)
@@ -40,6 +40,8 @@ static const unsigned long SENSOR_READ_INTERVAL_MS = 30000;   // Read sensor eve
 // =============================================================================
 // BATTERY MONITORING (Optional)
 // =============================================================================
+// Complete battery setup with TP4056 charger: see docs/hardware/BATTERY_SETUP_GUIDE.md
+// Requires voltage divider on GPIO 34: Battery+ -> 10K -> GPIO34 -> 10K -> GND
 #ifdef ESP32
   #define BATTERY_MONITOR_ENABLED
 #endif
@@ -91,8 +93,20 @@ static const float TEMP_OFFSET = 0.0;
 // Pressure sea-level reference (Pa) - for altitude calculation
 static const float PRESSURE_SEA_LEVEL = 101325.0;
 
+// Pressure baseline configuration (for barometer-style weather tracking)
+// Set to local station pressure for weather monitoring:
+//   - Sea level: 101.325 kPa (1013.25 hPa)
+//   - High altitude: ~98.0 kPa (980 hPa) for 200m elevation
+//   - Set to 0.0 to disable baseline tracking
+// Adjust via MQTT commands:
+//   - "calibrate" or "set_baseline": Use current reading
+//   - "baseline 980.0": Set specific value in hPa
+//   - "clear_baseline": Disable tracking
+static const float PRESSURE_BASELINE_DEFAULT = 0.0;  // Pa (0 = disabled)
+static const char* PRESSURE_BASELINE_FILE = "/pressure_baseline.txt";
+
 // Humidity calibration (optional)
-// Can adjust if sensor consistently reads high/low
-static const float HUMIDITY_OFFSET = 0.0;
+// Adjust if sensor consistently reads high/low compared to reference
+static const float HUMIDITY_OFFSET = 0.0;  // ±% RH adjustment
 
 #endif // DEVICE_CONFIG_H

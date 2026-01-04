@@ -5,13 +5,14 @@ Environmental monitoring sensor measuring temperature, humidity, and atmospheric
 ## Features
 
 - **BME280 Sensor**: Measures temperature, humidity, pressure, and calculates altitude
-- **WiFi Configuration**: WiFiManager portal for easy SSID/password configuration
-- **MQTT Integration**: Publishes readings to MQTT broker
+- **Double Reset Detector**: Press reset twice within 10 seconds to enter WiFi configuration portal
+- **WiFi Configuration**: WiFiManager portal for easy SSID/password configuration (AP at 192.168.4.1)
+- **MQTT Integration**: Publishes readings to MQTT broker with full device metrics
+- **Pressure Baseline Tracking**: Barometer-style weather tracking with pressure change trends
 - **OTA Updates**: Over-the-air firmware updates via ArduinoOTA
 - **Battery Support**: Optional battery voltage monitoring (ESP32)
-- **Deep Sleep**: Battery-optimized deep sleep mode with configurable interval
-- **Web Interface**: Simple HTML dashboard showing current readings
-- **REST API**: JSON endpoint for programmatic access
+- **Deep Sleep**: Battery-optimized deep sleep mode with configurable interval (MQTT-controlled)
+- **WiFi Power Save Disabled**: Ensures stable MQTT connectivity
 
 ## Hardware
 
@@ -50,6 +51,13 @@ BME280 I2C:
   Battery+ → 10K → GPIO 34 → 10K → GND
 ```
 
+**For complete battery setup with TP4056 charger:**
+See [docs/hardware/BATTERY_SETUP_GUIDE.md](../docs/hardware/BATTERY_SETUP_GUIDE.md) for:
+- TP4056 lithium battery charger wiring
+- Complete connection diagram (ESP32 + TP4056 + battery)
+- Safety warnings and component specifications
+- Solar panel integration (optional)
+
 ## Quick Start
 
 ### 1. Setup
@@ -80,10 +88,19 @@ pio run -e esp32dev-battery-display-serial -t upload
 
 ### 3. WiFi Configuration
 
-Device will create WiFi access point:
-- SSID: `BME280 Sensor` (or custom device name)
+**Method 1: Double Reset Detector (Recommended)**
+- Press the reset button twice within 10 seconds
+- Device enters configuration portal automatically
+
+**Method 2: First Boot**
+- Device will create WiFi access point on first boot
+
+**Configuration Portal:**
+- SSID: `BME280-{DeviceName}-Setup`
 - Open browser: `http://192.168.4.1`
 - Select your WiFi network and enter password
+- Optionally customize device name
+- Portal timeout: 5 minutes
 
 ### 4. Subsequent Uploads (OTA)
 
@@ -117,23 +134,41 @@ pio run -e esp32dev-battery -t upload --upload-port 192.168.X.X
 {
   "device": "Kitchen-Sensor",
   "chip_id": "A0B1C2D3E4F5",
+  "firmware_version": "1.1.7-build20260104",
   "schema_version": 1,
   "timestamp": 1234567890,
+  "uptime_seconds": 3600,
   "temperature_c": 22.5,
   "humidity_rh": 45.2,
   "pressure_pa": 101325,
+  "pressure_hpa": 1013.25,
   "altitude_m": -45.2,
+  "pressure_change_pa": -150.0,
+  "pressure_change_hpa": -1.5,
+  "pressure_trend": "falling",
+  "baseline_hpa": 980.0,
+  "battery_voltage": 3.85,
   "battery_percent": 85
 }
 ```
 
-## Configuration
+## MQTT Commands
 
-### Device Name
+All commands sent to `esp-sensor-hub/{device-name}/command` topic:
+
+### Pressure Baseline (Barometer Calibration)
 
 ```bash
-# Change device name
-mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "name New-Kitchen-Sensor"
+# Set current pressure as baseline (weather tracking)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "calibrate"
+# OR
+mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "set_baseline"
+
+# Set specific baseline value (in hPa)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "baseline 980.0"
+
+# Clear baseline (disable tracking)
+mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "clear_baseline"
 ```
 
 ### Deep Sleep (Battery Mode)
@@ -142,8 +177,18 @@ mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "name New-
 # Enable 60-second deep sleep interval
 mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "deepsleep 60"
 
-# Disable deep sleep
+# Disable deep sleep (continuous operation)
 mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "deepsleep 0"
+```
+
+### Device Control
+
+```bash
+# Request status update
+mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "status"
+
+# Restart device
+mosquitto_pub -h BROKER -t "esp-sensor-hub/Kitchen-Sensor/command" -m "restart"
 ```
 
 ## Platforms

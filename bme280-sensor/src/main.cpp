@@ -16,6 +16,22 @@
 #endif
 
 #include <WiFiManager.h>
+
+// DRD storage configuration - MUST be defined BEFORE including ESP_DoubleResetDetector.h
+#ifdef ESP32
+  #define ESP_DRD_USE_SPIFFS    true
+  #define ESP_DRD_USE_EEPROM    false
+  #define ESP_DRD_USE_LITTLEFS  false
+#else
+  #define ESP_DRD_USE_LITTLEFS  true
+  #define ESP_DRD_USE_EEPROM    false
+  #define ESP_DRD_USE_SPIFFS    false
+  #define ESP8266_DRD_USE_RTC   false
+#endif
+
+#define DOUBLERESETDETECTOR_DEBUG  true  // Enable debug output
+
+#include <ESP_DoubleResetDetector.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_BME280.h>
@@ -34,6 +50,13 @@
 // =============================================================================
 // DEVICE CONFIGURATION
 // =============================================================================
+
+// Double Reset Detector configuration
+#define DRD_TIMEOUT 10          // Seconds to wait for second reset
+#define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
+
+// Create Double Reset Detector instance (initialized in setup after filesystem mount)
+static DoubleResetDetector* drd = nullptr;
 
 // Device name storage
 char deviceName[40] = "BME280 Sensor";
@@ -66,6 +89,9 @@ DeviceMetrics metrics;
 int deepSleepSeconds = 0;
 volatile bool otaInProgress = false;
 const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
+
+// Pressure baseline tracking (barometer-style)
+float pressureBaseline = PRESSURE_BASELINE_DEFAULT;
 
 // Global instances
 Adafruit_BME280 bme280;
@@ -140,7 +166,48 @@ void saveDeviceName(const char* name) {
     Serial.printf("[CONFIG] Saved device name: %s\n", deviceName);
   }
 }
+void savePressureBaseline(float baseline) {
+#ifdef ESP32
+  File file = SPIFFS.open(PRESSURE_BASELINE_FILE, "w");
+#else
+  File file = LittleFS.open(PRESSURE_BASELINE_FILE, "w");
+#endif
+  if (file) {
+    file.println(baseline, 2);  // Save with 2 decimal places
+    file.close();
+    Serial.printf("[CONFIG] Saved pressure baseline: %.2f Pa (%.2f hPa)\n", baseline, baseline / 100.0);
+  } else {
+    Serial.println("[CONFIG] Failed to save pressure baseline");
+  }
+}
 
+float loadPressureBaseline() {
+#ifdef ESP32
+  if (!SPIFFS.exists(PRESSURE_BASELINE_FILE)) {
+    return PRESSURE_BASELINE_DEFAULT;
+  }
+  File file = SPIFFS.open(PRESSURE_BASELINE_FILE, "r");
+#else
+  if (!LittleFS.exists(PRESSURE_BASELINE_FILE)) {
+    return PRESSURE_BASELINE_DEFAULT;
+  }
+  File file = LittleFS.open(PRESSURE_BASELINE_FILE, "r");
+#endif
+  
+  if (!file) {
+    return PRESSURE_BASELINE_DEFAULT;
+  }
+  
+  float baseline = file.parseFloat();
+  file.close();
+  
+  if (baseline > 0) {
+    Serial.printf("[BASELINE] Loaded: %.2f Pa (%.2f hPa)\n", baseline, baseline / 100.0);
+  } else {
+    Serial.println("[BASELINE] Tracking disabled (0.0)");
+  }
+  return baseline;
+}
 // =============================================================================
 // DEEP SLEEP MANAGEMENT
 // =============================================================================
@@ -191,8 +258,13 @@ void saveDeepSleepConfig() {
 // =============================================================================
 
 bool initializeSensor() {
+  // Initialize I2C with correct GPIO pins for ESP32-S3
+  Wire.begin(BME280_I2C_SDA, BME280_I2C_SCL);
+  
+  // Initialize BME280 with confirmed I2C address
   if (!bme280.begin(BME280_I2C_ADDR)) {
-    Serial.println("[SENSOR] BME280 initialization failed!");
+    Serial.printf("[SENSOR] BME280 initialization failed at address 0x%02X!\n", BME280_I2C_ADDR);
+    Serial.printf("[SENSOR] Check wiring: SDA=GPIO%d, SCL=GPIO%d\n", BME280_I2C_SDA, BME280_I2C_SCL);
     return false;
   }
   
@@ -206,7 +278,7 @@ bool initializeSensor() {
     Adafruit_BME280::STANDBY_MS_0_5      // Standby time
   );
   
-  Serial.println("[SENSOR] BME280 initialized successfully");
+  Serial.printf("[SENSOR] BME280 initialized successfully at address 0x%02X\n", BME280_I2C_ADDR);
   return true;
 }
 
@@ -227,10 +299,87 @@ void readSensorData() {
   humidity_rh = humidity_event.relative_humidity + HUMIDITY_OFFSET;
   
   // Calculate altitude from pressure
-  altitude_m = 44330.0 * (1.0 - pow(pressure_pa / (PRESSURE_SEA_LEVEL * 100.0), 1.0/5.255));
+  altitude_m = 44330.0 * (1.0 - pow(pressure_pa / (PRESSURE_SEA_LEVEL), 1.0/5.255));
   
   Serial.printf("[SENSOR] Temp: %.2f°C, Humidity: %.1f%%, Pressure: %.2f hPa, Altitude: %.1f m\n",
                 temperature_c, humidity_rh, pressure_pa / 100.0, altitude_m);
+}
+
+// Read battery voltage and percentage (optional)
+void readBattery() {
+#ifdef BATTERY_MONITOR_ENABLED
+  int raw = analogRead(BATTERY_PIN);
+  float voltage = (raw / ADC_MAX) * REF_VOLTAGE * VOLTAGE_DIVIDER * CALIBRATION;
+  
+  // Convert to percentage (3.0V = 0%, 4.2V = 100%)
+  float percent = ((voltage - BATTERY_MIN_V) / (BATTERY_MAX_V - BATTERY_MIN_V)) * 100.0;
+  percent = constrain(percent, 0, 100);
+  
+  metrics.batteryVoltage = voltage;
+  metrics.batteryPercent = (int)percent;
+  
+  Serial.printf("[BATTERY] Voltage: %.2fV, Percentage: %d%%\n", voltage, (int)percent);
+#endif
+}
+
+// =============================================================================
+// DEEP SLEEP MANAGEMENT
+// =============================================================================
+
+void enterDeepSleepIfEnabled() {
+  // Check if deep sleep is disabled at compile time (e.g., for ESP8266 without GPIO16→RST wiring)
+  #ifdef DISABLE_DEEP_SLEEP
+    if (deepSleepSeconds > 0) {
+      Serial.println("[DEEP SLEEP] Deep sleep is disabled on this device (DISABLE_DEEP_SLEEP flag set)");
+    }
+    return;
+  #endif
+
+  if (deepSleepSeconds > 0) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  DEEP SLEEP ACTIVATED");
+    Serial.println("========================================");
+    Serial.printf("[DEEP SLEEP] Entering deep sleep for %d seconds...\n", deepSleepSeconds);
+    #ifdef ESP8266
+      Serial.println();
+      Serial.println("*** CRITICAL HARDWARE REQUIREMENT ***");
+      Serial.println("GPIO 16 (D0) MUST be connected to RST pin for wake-up!");
+      Serial.println("Without this connection, device will sleep FOREVER!");
+      Serial.println("Circuit: RST ──► 10KΩ ──► GPIO 16, with 0.1µF cap GPIO16─►GND");
+      Serial.println("*** END HARDWARE REQUIREMENT ***");
+      Serial.println();
+    #endif
+    #ifdef ESP32
+      Serial.println("[DEEP SLEEP] ESP32 RTC timer configured - no hardware mods needed");
+
+      // Gracefully disconnect MQTT and WiFi before deep sleep
+      Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
+      if (mqttClient.connected()) {
+        mqttClient.disconnect();
+      }
+      WiFi.disconnect(true);  // true = turn off WiFi radio
+      delay(100);  // Give time for WiFi to power down
+    #endif
+
+    // Flush serial before sleeping
+    Serial.flush();
+    delay(50);
+
+#ifdef ESP8266
+    // ESP8266 deep sleep with timer requires GPIO 16 (D0) connected to RST pin
+    // For proper wake-up: RST -> 10K resistor -> GPIO 16, with 0.1µF capacitor RST->GND
+    ESP.deepSleep(deepSleepSeconds * 1000000ULL); // microseconds
+#else // ESP32
+    // ESP32 has built-in RTC - no hardware modifications needed
+    uint64_t sleepTime = deepSleepSeconds * 1000000ULL;
+    Serial.printf("[DEEP SLEEP] Configuring RTC timer for %llu microseconds\n", sleepTime);
+    esp_sleep_enable_timer_wakeup(sleepTime);
+    Serial.println("[DEEP SLEEP] Starting deep sleep NOW...");
+    Serial.flush();
+    esp_deep_sleep_start();
+#endif
+  }
 }
 
 // =============================================================================
@@ -323,6 +472,15 @@ bool publishReadings() {
   doc["pressure_hpa"] = pressure_pa / 100.0;
   doc["altitude_m"] = altitude_m;
   
+  // Add pressure baseline tracking (barometer-style)
+  if (pressureBaseline > 0) {
+    float pressureChange = pressure_pa - pressureBaseline;
+    doc["pressure_change_pa"] = pressureChange;
+    doc["pressure_change_hpa"] = pressureChange / 100.0;
+    doc["pressure_trend"] = (pressureChange > 50) ? "rising" : (pressureChange < -50) ? "falling" : "steady";
+    doc["baseline_hpa"] = pressureBaseline / 100.0;
+  }
+  
 #ifdef BATTERY_MONITOR_ENABLED
   if (metrics.batteryPercent >= 0) {
     doc["battery_voltage"] = metrics.batteryVoltage;
@@ -349,16 +507,23 @@ void publishStatus() {
   doc["device"] = deviceName;
   doc["chip_id"] = chipId;
   doc["firmware_version"] = getFirmwareVersion();
+  doc["schema_version"] = 1;
+  doc["timestamp"] = millis() / 1000;
   doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
+  doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+  doc["wifi_rssi"] = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
+  doc["ip_address"] = WiFi.localIP().toString();
   doc["free_heap"] = ESP.getFreeHeap();
-  doc["rssi"] = WiFi.RSSI();
-  doc["mqtt_connected"] = mqttClient.connected();
-  doc["mqtt_publish_failures"] = metrics.mqttPublishFailures;
-  doc["sensor_read_failures"] = metrics.sensorReadFailures;
+  doc["sensor_healthy"] = (metrics.sensorReadFailures == 0);
   doc["wifi_reconnects"] = metrics.wifiReconnects;
+  doc["sensor_read_failures"] = metrics.sensorReadFailures;
+  doc["deep_sleep_enabled"] = (deepSleepSeconds > 0);
   doc["deep_sleep_seconds"] = deepSleepSeconds;
+  if (pressureBaseline > 0) {
+    doc["pressure_baseline_hpa"] = pressureBaseline / 100.0;
+  }
   
-  publishJson(getTopicStatus(), doc, false);
+  publishJson(getTopicStatus(), doc, true);
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -372,10 +537,60 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   
   if (topicStr.endsWith("/command")) {
     // Handle device commands here
-    if (message == "restart") {
+    if (message == "calibrate" || message == "set_baseline") {
+      // Set current pressure as baseline
+      pressureBaseline = pressure_pa;
+      savePressureBaseline(pressureBaseline);
+      String msg = String("Pressure baseline set to ") + String(pressureBaseline / 100.0, 2) + " hPa (current reading)";
+      publishEvent("pressure_calibrated", msg, "info");
+      publishStatus();
+    } else if (message.startsWith("baseline ")) {
+      // Set specific baseline value (in hPa)
+      float baselineHpa = message.substring(9).toFloat();
+      if (baselineHpa > 900 && baselineHpa < 1100) {  // Sanity check
+        pressureBaseline = baselineHpa * 100.0;  // Convert hPa to Pa
+        savePressureBaseline(pressureBaseline);
+        String msg = String("Pressure baseline set to ") + String(baselineHpa, 2) + " hPa";
+        publishEvent("pressure_calibrated", msg, "info");
+        publishStatus();
+      } else {
+        publishEvent("command_error", "Invalid baseline value (must be 900-1100 hPa)", "error");
+      }
+    } else if (message == "clear_baseline") {
+      pressureBaseline = 0.0;
+      savePressureBaseline(0.0);
+      publishEvent("pressure_calibrated", "Pressure baseline cleared (tracking disabled)", "info");
+      publishStatus();
+    } else if (message == "restart") {
       publishEvent("device_restart", "Restarting device via MQTT command", "warning");
       delay(500);
       ESP.restart();
+    } else if (message == "status") {
+      Serial.println("[MQTT] Received status request");
+      publishStatus();
+    } else if (message.startsWith("deepsleep ")) {
+      // Format: "deepsleep 300" for 300 seconds
+      String secondsStr = message.substring(10);
+      int seconds = secondsStr.toInt();
+      
+      if (seconds >= 0 && seconds <= 3600) {  // Max 1 hour
+        deepSleepSeconds = seconds;
+        saveDeepSleepConfig();
+        
+        if (seconds > 0) {
+          String msg = "Deep sleep set to " + String(seconds) + " seconds via MQTT";
+          publishEvent("deep_sleep_config", msg, "info");
+          Serial.printf("[DEEP SLEEP] Configuration updated: %d seconds\n", seconds);
+          Serial.println("[DEEP SLEEP] Device will restart to apply configuration");
+          delay(1000);
+          ESP.restart();
+        } else {
+          publishEvent("deep_sleep_config", "Deep sleep disabled via MQTT", "info");
+          Serial.println("[DEEP SLEEP] Deep sleep disabled");
+        }
+      } else {
+        Serial.printf("[MQTT] Invalid deep sleep value: %d (must be 0-3600)\n", seconds);
+      }
     }
   }
 }
@@ -391,9 +606,9 @@ bool ensureMqttConnected() {
   }
   
   lastMqttReconnectAttempt = now;
-  Serial.printf("[MQTT] Attempting connection to %s:%d\n", MQTT_BROKER, MQTT_PORT);
+  Serial.printf("[MQTT] Attempting connection to %s:%d\n", MQTT_SERVER, MQTT_PORT);
   
-  if (mqttClient.connect(chipId.c_str(), MQTT_USER, MQTT_PASS)) {
+  if (mqttClient.connect(chipId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
     Serial.println("[MQTT] Connected!");
     mqttClient.subscribe(getTopicCommand().c_str());
     publishEvent("mqtt_connected", "Connected to MQTT broker", "info");
@@ -405,7 +620,7 @@ bool ensureMqttConnected() {
 }
 
 void setupMQTT() {
-  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   mqttClient.setBufferSize(2048);
   mqttClient.setKeepAlive(30);
   mqttClient.setSocketTimeout(5);
@@ -420,10 +635,36 @@ void setupWiFi() {
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(300);
   
+  // Disable WiFi power save for stable MQTT connectivity
+  #ifdef ESP32
+    WiFi.setSleep(false);
+    Serial.println("[WiFi] Power save disabled (ESP32)");
+  #else
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+    Serial.println("[WiFi] Power save disabled (ESP8266)");
+  #endif
+  
+  // Add custom parameter for device name
+  WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+  wifiManager.addParameter(&custom_device_name);
+  
+  // Set save config callback to capture custom parameters
+  wifiManager.setSaveConfigCallback([]() {
+    Serial.println("[WiFi] Configuration saved via portal");
+  });
+  
   if (!wifiManager.autoConnect(deviceName)) {
     Serial.println("[WiFi] Configuration failed, restarting...");
     delay(3000);
     ESP.restart();
+  }
+  
+  // Save device name if it was changed in the portal
+  const char* newDeviceName = custom_device_name.getValue();
+  if (strlen(newDeviceName) > 0 && strcmp(newDeviceName, deviceName) != 0) {
+    saveDeviceName(newDeviceName);
+    updateTopicBase();
+    Serial.printf("[CONFIG] Device name updated to: %s\n", deviceName);
   }
   
   Serial.printf("[WiFi] Connected to %s\n", WiFi.SSID().c_str());
@@ -462,64 +703,12 @@ void setupOTA() {
 // =============================================================================
 // WEB SERVER
 // =============================================================================
-
-void handleRoot(AsyncWebServerRequest* request) {
-  String html = R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>BME280 Sensor</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: Arial; margin: 20px; }
-        .data { background: #f0f0f0; padding: 15px; border-radius: 5px; margin: 10px 0; }
-        .value { font-size: 24px; font-weight: bold; color: #0066cc; }
-    </style>
-</head>
-<body>
-    <h1>BME280 Environmental Sensor</h1>
-    <div class="data">
-        <p>Temperature: <span class="value" id="temp">--</span> °C</p>
-        <p>Humidity: <span class="value" id="humidity">--</span> %</p>
-        <p>Pressure: <span class="value" id="pressure">--</span> hPa</p>
-        <p>Altitude: <span class="value" id="altitude">--</span> m</p>
-    </div>
-    <script>
-        setInterval(() => {
-            fetch('/api/readings').then(r => r.json()).then(d => {
-                document.getElementById('temp').textContent = d.temperature_c.toFixed(1);
-                document.getElementById('humidity').textContent = d.humidity_rh.toFixed(1);
-                document.getElementById('pressure').textContent = (d.pressure_pa / 100).toFixed(1);
-                document.getElementById('altitude').textContent = d.altitude_m.toFixed(1);
-            });
-        }, 1000);
-    </script>
-</body>
-</html>
-  )";
-  request->send(200, "text/html", html);
-}
-
-void setupWebServer() {
-  // Web interface
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    handleRoot(request);
-  });
-  
-  // JSON API
-  server.on("/api/readings", HTTP_GET, [](AsyncWebServerRequest *request) {
-    StaticJsonDocument<512> doc;
-    doc["temperature_c"] = temperature_c;
-    doc["humidity_rh"] = humidity_rh;
-    doc["pressure_pa"] = pressure_pa;
-    doc["altitude_m"] = altitude_m;
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-  
-  server.begin();
-}
+// Web server disabled to reduce memory footprint and power consumption
+// All data access via MQTT topics:
+//   - Readings: esp-sensor-hub/{device-name}/readings
+//   - Status: esp-sensor-hub/{device-name}/status
+//   - Events: esp-sensor-hub/{device-name}/events
+//   - Commands: esp-sensor-hub/{device-name}/command
 
 // =============================================================================
 // MAIN SETUP AND LOOP
@@ -529,6 +718,76 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
   
+  // Mount filesystem FIRST (required for DRD and config storage)
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) {
+    Serial.println("[FS] SPIFFS mount failed");
+  } else {
+    Serial.println("[FS] SPIFFS mounted successfully");
+  }
+#else
+  if (!LittleFS.begin()) {
+    Serial.println("[FS] LittleFS mount failed");
+  } else {
+    Serial.println("[FS] LittleFS mounted successfully");
+  }
+#endif
+
+  // Initialize Double Reset Detector (after filesystem mount)
+  static DoubleResetDetector drdInstance(DRD_TIMEOUT, DRD_ADDRESS);
+  drd = &drdInstance;
+  Serial.println("[DRD] Double Reset Detector initialized");
+
+  // Check for double reset IMMEDIATELY (before slow WiFi/MQTT setup)
+  if (drd->detectDoubleReset()) {
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("  DOUBLE RESET DETECTED");
+    Serial.println("  Starting WiFi Configuration Portal");
+    Serial.println("========================================");
+    Serial.println();
+
+    // Load device name first (needed for AP name)
+    loadDeviceName();
+
+    WiFiManager wm;
+    String apName = String(deviceName);
+    apName.replace(" ", "-");
+    apName = "BME280-" + apName + "-Setup";
+
+    Serial.println("[WiFi] Connect to AP: " + apName);
+    Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
+    Serial.println();
+
+    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
+    wm.addParameter(&custom_device_name);
+    wm.setConfigPortalTimeout(300); // 5 minute timeout
+
+    bool shouldSaveConfig = false;
+    wm.setSaveConfigCallback([&shouldSaveConfig](){
+      shouldSaveConfig = true;
+    });
+
+    if (wm.startConfigPortal(apName.c_str())) {
+      drd->stop();  // Clear double-reset flag after successful config
+      if (shouldSaveConfig) {
+        const char* newName = custom_device_name.getValue();
+        strcpy(deviceName, newName);
+        saveDeviceName(deviceName);
+        Serial.print("[Config] Device name updated: ");
+        Serial.println(newName);
+      }
+      Serial.println("[WiFi] Configuration portal completed successfully");
+      Serial.println("[WiFi] Restarting to apply new configuration...");
+      delay(1000);
+      ESP.restart();
+    } else {
+      Serial.println("[WiFi] Configuration portal timeout or cancelled");
+      Serial.println("[WiFi] Continuing with existing configuration...");
+      drd->stop();  // Clear flag even if portal was cancelled
+    }
+  }
+
   Serial.println("\n\n================================");
   Serial.println("  BME280 Environmental Sensor");
   Serial.println("================================\n");
@@ -550,6 +809,13 @@ void setup() {
   chipId = generateChipId();
   updateTopicBase();
   
+  // Load configuration
+  loadDeviceName();
+  loadDeepSleepConfig();
+  pressureBaseline = loadPressureBaseline();
+  Serial.printf("[CONFIG] Device: %s\n", deviceName);
+  Serial.printf("[DEEP SLEEP] Config: %d seconds\n", deepSleepSeconds);
+  
   // Setup MQTT
   setupMQTT();
   
@@ -561,13 +827,72 @@ void setup() {
     setupOTA();
   }
   
-  // Setup web server
-  // setupWebServer();
+  // Deep sleep mode: skip web server, publish immediately, enter sleep
+  if (deepSleepSeconds > 0) {
+    Serial.println("\n[DEEP SLEEP] Device configured for deep sleep mode");
+    Serial.printf("[DEEP SLEEP] Will sleep for %d seconds after publishing\n\n", deepSleepSeconds);
+    
+    // Read battery and sensor immediately
+    readBattery();
+    readSensorData();
+    
+    // Publish data
+    bool publishSuccess = publishReadings();
+    publishStatus();
+    
+    if (publishSuccess) {
+      Serial.println("[DEEP SLEEP] Initial publish successful");
+    } else {
+      Serial.println("[DEEP SLEEP] Initial publish failed - will retry");
+    }
+    
+    // Give MQTT time to complete
+    delay(100);
+    mqttClient.loop();
+    delay(100);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("     Setup Complete (Deep Sleep Mode)");
+    Serial.println("========================================");
+    Serial.println();
+
+    // Wait briefly to process any incoming MQTT commands (e.g., to disable deep sleep)
+    Serial.println("[DEEP SLEEP] Waiting 5 seconds for MQTT commands...");
+    unsigned long commandWaitStart = millis();
+    while (millis() - commandWaitStart < 5000) {
+      // Check if MQTT connection is still active before processing
+      if (!mqttClient.connected()) {
+        Serial.println("[DEEP SLEEP] MQTT disconnected during command wait window");
+        break;
+      }
+      mqttClient.loop();  // Process incoming MQTT messages
+      delay(10);
+    }
+
+    // Enter deep sleep only if it's still enabled (user may have disabled it via MQTT)
+    if (deepSleepSeconds > 0 && publishSuccess) {
+      enterDeepSleepIfEnabled();
+      // If we reach here, deep sleep failed or was aborted
+    } else if (deepSleepSeconds == 0) {
+      Serial.println("[DEEP SLEEP] Disabled via MQTT - continuing normal operation");
+    } else {
+      Serial.println("[DEEP SLEEP] Initial publish failed - staying awake to retry");
+    }
+    // Fall through to normal operation
+  }
+  
+  // Web server disabled - use MQTT for all data access
   
   Serial.println("\n[SETUP] Device ready!\n");
 }
 
 void loop() {
+  // Stop DRD once we're in main loop (device successfully started)
+  if (drd) {
+    drd->loop();
+  }
+  
   // Handle OTA
   if (deepSleepSeconds == 0) {
     ArduinoOTA.handle();
@@ -589,6 +914,9 @@ void loop() {
   if (now - lastReadTime > MQTT_PUBLISH_INTERVAL_MS) {
     lastReadTime = now;
     
+    // Read battery voltage (if enabled)
+    readBattery();
+    
     // Read sensor
     readSensorData();
     
@@ -604,6 +932,9 @@ void loop() {
       Serial.println("[MQTT] Skipping publish - not connected to broker");
       metrics.mqttPublishFailures++;
     }
+    
+    // Enter deep sleep if configured (after publishing)
+    enterDeepSleepIfEnabled();
   }
   
   // Periodic status logging to serial (every 60 seconds)
