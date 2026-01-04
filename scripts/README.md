@@ -9,7 +9,7 @@ Helper scripts for building and flashing ESP devices.
 **`mqtt_device_control.sh`** - Comprehensive MQTT command interface for all ESP32 devices:
 
 ```bash
-cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
+cd scripts
 
 # Enable deep sleep (30 second interval)
 ./mqtt_device_control.sh deepsleep 30
@@ -70,7 +70,7 @@ cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
 Updates device information from `DEVICE_INVENTORY.md` to PostgreSQL database on raspberrypi2:
 
 ```bash
-cd /home/aachten/PlatformIO/esp12f_ds18b20_temp_sensor/scripts
+cd scripts
 
 # Install dependencies (once)
 pip3 install psycopg2-binary
