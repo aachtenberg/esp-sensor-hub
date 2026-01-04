@@ -50,10 +50,18 @@ BUILD_DATE=$(date +%Y%m%d)
 echo "Updating BUILD_TIMESTAMP to $BUILD_DATE"
 
 # Update all occurrences in platformio.ini
-sed -i -E "s/(FIRMWARE_VERSION_MAJOR=).*/\1$MAJOR/g" "$INI_FILE"
-sed -i -E "s/(FIRMWARE_VERSION_MINOR=).*/\1$MINOR/g" "$INI_FILE"
-sed -i -E "s/(FIRMWARE_VERSION_PATCH=).*/\1$PATCH/g" "$INI_FILE"
-sed -i -E "s/(BUILD_TIMESTAMP=).*/\1$BUILD_DATE/g" "$INI_FILE"
+# Use portable sed in-place command that works on both GNU sed (Linux) and BSD sed (macOS)
+if sed --version 2>/dev/null | grep -q "GNU sed"; then
+  SED_INPLACE=(sed -i -E)
+else
+  # macOS / BSD sed requires an explicit backup extension argument for -i
+  SED_INPLACE=(sed -i '' -E)
+fi
+
+"${SED_INPLACE[@]}" "s/(FIRMWARE_VERSION_MAJOR=).*/\1$MAJOR/g" "$INI_FILE"
+"${SED_INPLACE[@]}" "s/(FIRMWARE_VERSION_MINOR=).*/\1$MINOR/g" "$INI_FILE"
+"${SED_INPLACE[@]}" "s/(FIRMWARE_VERSION_PATCH=).*/\1$PATCH/g" "$INI_FILE"
+"${SED_INPLACE[@]}" "s/(BUILD_TIMESTAMP=).*/\1$BUILD_DATE/g" "$INI_FILE"
 
 echo "✓ Updated version to $MAJOR.$MINOR.$PATCH-build$BUILD_DATE"
 echo "✓ All environments updated"
