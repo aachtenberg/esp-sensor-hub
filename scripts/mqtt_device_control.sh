@@ -14,6 +14,7 @@ COMMAND_TOPIC="esp-sensor-hub/${DEVICE_NAME}/command"
 STATUS_TOPIC="esp-sensor-hub/${DEVICE_NAME}/status"
 EVENTS_TOPIC="esp-sensor-hub/${DEVICE_NAME}/events"
 TEMP_TOPIC="esp-sensor-hub/${DEVICE_NAME}/temperature"
+READINGS_TOPIC="esp-sensor-hub/${DEVICE_NAME}/readings"
 
 # Color output (disabled for simplicity)
 RED=''
@@ -103,6 +104,7 @@ while [[ $# -gt 0 ]]; do
             STATUS_TOPIC="esp-sensor-hub/${DEVICE_NAME}/status"
             EVENTS_TOPIC="esp-sensor-hub/${DEVICE_NAME}/events"
             TEMP_TOPIC="esp-sensor-hub/${DEVICE_NAME}/temperature"
+            READINGS_TOPIC="esp-sensor-hub/${DEVICE_NAME}/readings"
             shift 2
             ;;
         -r|--retry)
@@ -174,7 +176,7 @@ monitor_topics() {
         message=$(echo "$line" | cut -d' ' -f2-)
         
         # Color code by topic type
-        if [[ "$topic" == *"/temperature" ]]; then
+        if [[ "$topic" == *"/temperature" ]] || [[ "$topic" == *"/readings" ]]; then
             echo -e "[$timestamp] ${GREEN}$topic${NC}"
             echo "$message" | jq '.' 2>/dev/null || echo "$message"
         elif [[ "$topic" == *"/status" ]]; then

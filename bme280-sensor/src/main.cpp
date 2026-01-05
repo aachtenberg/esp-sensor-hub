@@ -90,6 +90,10 @@ int deepSleepSeconds = 0;
 volatile bool otaInProgress = false;
 const char* DEEP_SLEEP_FILE = "/deep_sleep_seconds.txt";
 
+// Sensor reading interval configuration (seconds)
+int sensorIntervalSeconds = 30;  // Default 30 seconds
+const char* SENSOR_INTERVAL_FILE = "/sensor_interval.txt";
+
 // Pressure baseline tracking (barometer-style)
 float pressureBaseline = PRESSURE_BASELINE_DEFAULT;
 
@@ -250,6 +254,53 @@ void saveDeepSleepConfig() {
     file.println(deepSleepSeconds);
     file.close();
     Serial.printf("[DEEP SLEEP] Saved config: %d seconds\n", deepSleepSeconds);
+  }
+}
+
+void loadSensorIntervalConfig() {
+#ifdef ESP32
+  if (!SPIFFS.exists(SENSOR_INTERVAL_FILE)) {
+#else
+  if (!LittleFS.exists(SENSOR_INTERVAL_FILE)) {
+#endif
+    sensorIntervalSeconds = 30;
+    return;
+  }
+  
+#ifdef ESP32
+  File file = SPIFFS.open(SENSOR_INTERVAL_FILE, "r");
+#else
+  File file = LittleFS.open(SENSOR_INTERVAL_FILE, "r");
+#endif
+
+  if (!file) {
+    sensorIntervalSeconds = 30;
+    return;
+  }
+  
+  if (file.available()) {
+    sensorIntervalSeconds = file.readStringUntil('\n').toInt();
+    if (sensorIntervalSeconds < 5) sensorIntervalSeconds = 5;
+    Serial.printf("[SENSOR] Loaded interval config: %d seconds\n", sensorIntervalSeconds);
+  } else {
+    sensorIntervalSeconds = 30;
+  }
+  file.close();
+}
+
+void saveSensorIntervalConfig() {
+#ifdef ESP32
+  if (!SPIFFS.begin(true)) return;
+  File file = SPIFFS.open(SENSOR_INTERVAL_FILE, "w");
+#else
+  if (!LittleFS.begin()) return;
+  File file = LittleFS.open(SENSOR_INTERVAL_FILE, "w");
+#endif
+  
+  if (file) {
+    file.println(sensorIntervalSeconds);
+    file.close();
+    Serial.printf("[SENSOR] Saved interval config: %d seconds\n", sensorIntervalSeconds);
   }
 }
 
@@ -519,6 +570,7 @@ void publishStatus() {
   doc["sensor_read_failures"] = metrics.sensorReadFailures;
   doc["deep_sleep_enabled"] = (deepSleepSeconds > 0);
   doc["deep_sleep_seconds"] = deepSleepSeconds;
+  doc["sensor_interval_seconds"] = sensorIntervalSeconds;
   if (pressureBaseline > 0) {
     doc["pressure_baseline_hpa"] = pressureBaseline / 100.0;
   }
@@ -590,6 +642,23 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         }
       } else {
         Serial.printf("[MQTT] Invalid deep sleep value: %d (must be 0-3600)\n", seconds);
+      }
+    } else if (message.startsWith("interval ")) {
+      // Format: "interval 60" for 60 seconds between readings
+      String secondsStr = message.substring(9);
+      int seconds = secondsStr.toInt();
+      
+      if (seconds >= 5 && seconds <= 3600) {  // 5 seconds to 1 hour
+        sensorIntervalSeconds = seconds;
+        saveSensorIntervalConfig();
+        
+        String msg = "Sensor reading interval set to " + String(seconds) + " seconds via MQTT";
+        publishEvent("sensor_interval_config", msg, "info");
+        Serial.printf("[SENSOR] Interval updated: %d seconds\n", seconds);
+        publishStatus();
+      } else {
+        publishEvent("command_error", "Invalid interval value (must be 5-3600 seconds)", "error");
+        Serial.printf("[MQTT] Invalid interval value: %d (must be 5-3600)\n", seconds);
       }
     }
   }
@@ -795,6 +864,7 @@ void setup() {
   // Load configuration
   loadDeviceName();
   loadDeepSleepConfig();
+  loadSensorIntervalConfig();
   
   // Initialize sensor
   if (!initializeSensor()) {
@@ -910,8 +980,9 @@ void loop() {
   static unsigned long lastStatusLog = 0;
   
   unsigned long now = millis();
+  unsigned long intervalMs = sensorIntervalSeconds * 1000UL;
   
-  if (now - lastReadTime > MQTT_PUBLISH_INTERVAL_MS) {
+  if (now - lastReadTime > intervalMs) {
     lastReadTime = now;
     
     // Read battery voltage (if enabled)
