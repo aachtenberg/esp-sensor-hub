@@ -1187,7 +1187,11 @@ void setup() {
   if (shouldStartConfigPortal) {
     Serial.println();
     Serial.println("========================================");
+    #ifdef ESP32
     Serial.printf("  CONFIG PORTAL TRIGGERED: %s\n", configPortalReason);
+    #else
+    Serial.println("  CONFIG PORTAL TRIGGERED");
+    #endif
     Serial.println("  Starting WiFi Configuration Portal");
     Serial.println("========================================");
     Serial.println();
