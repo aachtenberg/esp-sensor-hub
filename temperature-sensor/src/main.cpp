@@ -495,9 +495,9 @@ bool ensureMqttConnected() {
     }
   }
 
+  // Check WiFi status - don't wait here, WiFi wait should happen earlier in flow
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[MQTT] WiFi not connected, cannot connect to broker");
-    return false;
+    return false;  // Silent return - WiFi status logged elsewhere
   }
 
   // Simple rate limit: don't try reconnecting too frequently
@@ -739,7 +739,7 @@ void enterDeepSleepIfEnabled() {
       // Gracefully disconnect MQTT and WiFi before deep sleep
       Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
       gracefulMqttDisconnect();
-      WiFi.disconnect(true);  // true = turn off WiFi radio
+      WiFi.disconnect(false);  // false = keep credentials, just disconnect
       delay(100);  // Give time for WiFi to power down
     #endif
 
@@ -1057,46 +1057,8 @@ void setupWiFi() {
   // Normal boot: attempt WiFi connection with retry logic
   Serial.println("[WiFi] Attempting connection...");
 
-  // Check if we have saved credentials
-  if (WiFi.SSID().length() == 0) {
-    Serial.println("[WiFi] No saved credentials found");
-
-    // For deep sleep devices, skip portal and go to sleep - will retry on next wake
-    if (deepSleepSeconds > 0) {
-      Serial.println("[WiFi] Deep sleep enabled - will retry on next wake cycle");
-      Serial.println("[WiFi] Tip: Double-tap reset button to configure WiFi");
-      return;
-    }
-
-    // For non-deep-sleep devices, start config portal
-    Serial.println("[WiFi] Starting configuration portal...");
-    WiFiManager wm;
-    String apName = String(deviceName);
-    apName.replace(" ", "-");
-    apName = "Temp-" + apName + "-Setup";
-
-    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
-    wm.addParameter(&custom_device_name);
-    wm.setConnectTimeout(0);
-
-    bool shouldSaveConfig = false;
-    wm.setSaveConfigCallback([&shouldSaveConfig](){
-      shouldSaveConfig = true;
-    });
-
-    if (wm.autoConnect(apName.c_str())) {
-      if (shouldSaveConfig) {
-        const char* newName = custom_device_name.getValue();
-        strcpy(deviceName, newName);
-        updateTopicBase();
-        saveDeviceName(deviceName);
-      }
-    }
-    return;
-  }
-
-  // We have saved credentials - attempt connection with retries
-  Serial.printf("[WiFi] Connecting to saved network: %s\n", WiFi.SSID().c_str());
+  // Try to connect with auto-connect (uses stored credentials if available)
+  WiFi.begin();
 
   // For deep sleep devices: retry without starting portal on failure
   if (deepSleepSeconds > 0) {
@@ -1106,7 +1068,9 @@ void setupWiFi() {
     for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       Serial.printf("[WiFi] Connection attempt %d/%d...\n", attempt, MAX_RETRIES);
 
-      WiFi.begin();  // Use saved credentials
+      if (attempt > 1) {
+        WiFi.begin();  // Retry connection (first attempt already started above)
+      }
 
       unsigned long startAttempt = millis();
       while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < RETRY_TIMEOUT_MS) {
@@ -1371,38 +1335,44 @@ void setup() {
 
   // If deep sleep is enabled, publish immediately and wait for MQTT commands
   if (deepSleepSeconds > 0) {
-    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - publishing and waiting for commands");
+    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - strict sequential wake flow");
+    Serial.println("[DEEP SLEEP] Step 1/4: Waiting for WiFi connection...");
 
-    // Wait for WiFi to connect after deep sleep wake (max 10 seconds)
-    Serial.println("[DEEP SLEEP] Waiting for WiFi connection...");
+    // STEP 1: Wait for WiFi (BLOCKING - nothing proceeds until WiFi is connected)
     unsigned long wifiWaitStart = millis();
+    int dotCount = 0;
     while (WiFi.status() != WL_CONNECTED && (millis() - wifiWaitStart) < 10000) {
       delay(100);
-      if ((millis() - wifiWaitStart) % 1000 == 0) {
+      if (++dotCount % 10 == 0) {  // Print dot every second
         Serial.print(".");
       }
     }
     Serial.println();
     
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[DEEP SLEEP] WiFi connection failed after 10s - staying awake to retry");
+      Serial.println("[DEEP SLEEP] ERROR: WiFi connection failed after 10s - staying awake to retry");
       lastPublishTime = millis();
       return;
     }
-    Serial.printf("[DEEP SLEEP] WiFi connected to %s (IP: %s, RSSI: %d dBm)\n", 
+    Serial.printf("[DEEP SLEEP] ✓ WiFi connected to %s (IP: %s, RSSI: %d dBm)\n", 
                   WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-    // Ensure MQTT is connected before publishing
+    // STEP 2: Connect to MQTT broker
+    Serial.println("[DEEP SLEEP] Step 2/4: Connecting to MQTT broker...");
     if (!ensureMqttConnected()) {
-      Serial.println("[DEEP SLEEP] MQTT connection failed - staying awake to retry");
+      Serial.println("[DEEP SLEEP] ERROR: MQTT connection failed - staying awake to retry");
       lastPublishTime = millis();
       return;
     }
+    Serial.println("[DEEP SLEEP] ✓ MQTT connected");
 
-    // Read temperature before publishing
+    // STEP 3: Read temperature sensor
+    Serial.println("[DEEP SLEEP] Step 3/4: Reading temperature sensor...");
     updateTemperatures();
+    Serial.printf("[DEEP SLEEP] ✓ Temperature: %.2f°C\n", temperatureC);
 
-    // Publish immediately
+    // STEP 4: Publish to MQTT
+    Serial.println("[DEEP SLEEP] Step 4/4: Publishing to MQTT...");
     bool publishSuccess = publishTemperature();
     publishStatus();
     
@@ -1514,12 +1484,8 @@ void loop() {
 
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnection...");
-      // Check if credentials exist before attempting reconnect
-      if (WiFi.SSID().length() > 0) {
-        WiFi.reconnect();
-      } else {
-        Serial.println("[WiFi] No stored credentials - skipping reconnect");
-      }
+      // Always attempt reconnect - WiFiManager handles credentials
+      WiFi.reconnect();
       metrics.wifiReconnects++;
       // Track how long we've been offline
       if (wifiDisconnectedSince == 0) {
