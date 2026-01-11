@@ -17,21 +17,10 @@
 
 #include <WiFiManager.h>
 
-// DRD storage configuration - MUST be defined BEFORE including ESP_DoubleResetDetector.h
+// NVS-based reset detection (no filesystem dependency)
 #ifdef ESP32
-  #define ESP_DRD_USE_SPIFFS    true
-  #define ESP_DRD_USE_EEPROM    false
-  #define ESP_DRD_USE_LITTLEFS  false
-#else
-  #define ESP_DRD_USE_LITTLEFS  true
-  #define ESP_DRD_USE_EEPROM    false
-  #define ESP_DRD_USE_SPIFFS    false
-  #define ESP8266_DRD_USE_RTC   false
+  #include <Preferences.h>
 #endif
-
-#define DOUBLERESETDETECTOR_DEBUG  true  // Enable debug output
-
-#include <ESP_DoubleResetDetector.h>
 #include <ArduinoOTA.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -49,12 +38,11 @@
 #endif
 #include "version.h"
 
-// Double Reset Detector configuration
-#define DRD_TIMEOUT 10          // Seconds to wait for second reset
-#define DRD_ADDRESS 0           // RTC memory address (ESP8266) or EEPROM address (ESP32)
-
-// Create Double Reset Detector instance (initialized in setup after filesystem mount)
-static DoubleResetDetector* drd = nullptr;
+// Reset detection and crash recovery state (ESP32 only)
+#ifdef ESP32
+Preferences resetPrefs;
+const char* configPortalReason = "none";  // Why portal was triggered
+#endif
 
 // Device name storage
 char deviceName[40] = "Temp Sensor";  // Default name
@@ -507,9 +495,9 @@ bool ensureMqttConnected() {
     }
   }
 
+  // Check WiFi status - don't wait here, WiFi wait should happen earlier in flow
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[MQTT] WiFi not connected, cannot connect to broker");
-    return false;
+    return false;  // Silent return - WiFi status logged elsewhere
   }
 
   // Simple rate limit: don't try reconnecting too frequently
@@ -628,6 +616,101 @@ void publishStatus() {
   publishJson(getTopicStatus(), doc, true);
 }
 
+// ==================== Reset Detection & Recovery (NVS-based, ESP32 only) ====================
+
+#ifdef ESP32
+void checkResetCounter() {
+  // Check for triple-reset and crash loop conditions (ESP32 reliable via NVS)
+  // This must be called early in setup() before other initialization
+
+  // Open preferences namespace for reset tracking
+  resetPrefs.begin("reset", false);
+
+  // ===== Crash loop detection =====
+  uint32_t crashFlag = resetPrefs.getUInt("crash_flag", 0);
+  uint32_t crashCnt = resetPrefs.getUInt("crash_cnt", 0);
+
+  if (crashFlag == CRASH_LOOP_MAGIC) {
+    crashCnt++;
+    resetPrefs.putUInt("crash_cnt", crashCnt);
+    Serial.printf("[RESET] Incomplete boot detected, crash count: %lu\n", crashCnt);
+
+    if (crashCnt >= CRASH_LOOP_THRESHOLD) {
+      Serial.println("[RESET] CRASH LOOP RECOVERY - entering config portal");
+      configPortalReason = "crash_recovery";
+      resetPrefs.putUInt("crash_cnt", 0); // Reset for next time
+    }
+  } else {
+    // Fresh power-on (or flag cleared), reset crash count only.
+    // Do NOT clear triple-reset counters here; they must persist across boots.
+    resetPrefs.putUInt("crash_cnt", 0);
+  }
+
+  // Mark boot in progress (cleared in clearCrashLoop after successful boot)
+  resetPrefs.putUInt("crash_flag", CRASH_LOOP_MAGIC);
+
+  // ===== Triple-reset detection =====
+  if (strcmp(configPortalReason, "crash_recovery") != 0) {
+    uint32_t cnt = resetPrefs.getUInt("reset_cnt", 0);
+    uint32_t window = resetPrefs.getUInt("window", 0);
+
+    // Sanity check
+    if (cnt > 10) {
+      Serial.printf("[RESET] Reset counter corrupted (%lu), clearing\n", cnt);
+      cnt = 0;
+      window = 0;
+      resetPrefs.putUInt("reset_cnt", cnt);
+      resetPrefs.putUInt("window", window);
+    }
+
+    if (window == 1 && cnt > 0 && cnt < 10) {
+      // Previous boot started a detection window
+      cnt++;
+      resetPrefs.putUInt("reset_cnt", cnt);
+      Serial.printf("[RESET] Reset count: %lu/%d\n", cnt, RESET_COUNT_THRESHOLD);
+
+      if (cnt >= RESET_COUNT_THRESHOLD) {
+        Serial.println("[RESET] TRIPLE RESET DETECTED - entering config portal");
+        configPortalReason = "triple_reset";
+        // Clear for next time
+        resetPrefs.putUInt("reset_cnt", 0);
+        resetPrefs.putUInt("window", 0);
+      }
+    } else {
+      // First reset or outside window
+      cnt = 1;
+      window = 1;
+      resetPrefs.putUInt("reset_cnt", cnt);
+      resetPrefs.putUInt("window", window);
+      Serial.println("[RESET] First reset, starting detection window");
+    }
+
+    // Wait for window; if no reset occurs, clear markers
+    delay(RESET_DETECT_TIMEOUT * 1000);
+
+    if (strcmp(configPortalReason, "none") == 0) {
+      Serial.println("[RESET] Reset window expired, normal boot");
+      resetPrefs.putUInt("reset_cnt", 0);
+      resetPrefs.putUInt("window", 0);
+    }
+  }
+
+  Serial.printf("[RESET] Boot reason: %s\n", configPortalReason);
+  resetPrefs.end();  // Close NVS namespace to free resources
+}
+
+void clearCrashLoop() {
+  // Called after successful boot (WiFi + sensors + web server initialized)
+  resetPrefs.begin("reset", false);  // Open NVS namespace
+  resetPrefs.putUInt("crash_flag", 0);
+  resetPrefs.putUInt("crash_cnt", 0);
+  resetPrefs.end();  // Close NVS namespace
+  Serial.println("[RESET] Crash loop flag cleared - boot successful");
+}
+#endif
+
+// ==================== End Reset Detection & Recovery ====================
+
 // Enter deep sleep if configured
 void enterDeepSleepIfEnabled() {
   // Check if deep sleep is disabled at compile time (e.g., for ESP8266 without GPIO16→RST wiring)
@@ -659,7 +742,7 @@ void enterDeepSleepIfEnabled() {
       // Gracefully disconnect MQTT and WiFi before deep sleep
       Serial.println("[DEEP SLEEP] Disconnecting MQTT and WiFi...");
       gracefulMqttDisconnect();
-      WiFi.disconnect(true);  // true = turn off WiFi radio
+      WiFi.disconnect(false);  // false = keep credentials, just disconnect
       delay(100);  // Give time for WiFi to power down
     #endif
 
@@ -906,9 +989,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       });
 
       if (wm.startConfigPortal(apName.c_str())) {
-        if (drd != nullptr) {
-          drd->stop();  // Clear double-reset flag after successful config
-        }
         if (shouldSaveConfig) {
           const char* newName = custom_device_name.getValue();
           String oldName = String(deviceName);
@@ -980,49 +1060,8 @@ void setupWiFi() {
   // Normal boot: attempt WiFi connection with retry logic
   Serial.println("[WiFi] Attempting connection...");
 
-  // Check if we have saved credentials
-  if (WiFi.SSID().length() == 0) {
-    Serial.println("[WiFi] No saved credentials found");
-
-    // For deep sleep devices, skip portal and go to sleep - will retry on next wake
-    if (deepSleepSeconds > 0) {
-      Serial.println("[WiFi] Deep sleep enabled - will retry on next wake cycle");
-      Serial.println("[WiFi] Tip: Double-tap reset button to configure WiFi");
-      return;
-    }
-
-    // For non-deep-sleep devices, start config portal
-    Serial.println("[WiFi] Starting configuration portal...");
-    WiFiManager wm;
-    String apName = String(deviceName);
-    apName.replace(" ", "-");
-    apName = "Temp-" + apName + "-Setup";
-
-    WiFiManagerParameter custom_device_name("device_name", "Device Name", deviceName, 40);
-    wm.addParameter(&custom_device_name);
-    wm.setConnectTimeout(0);
-
-    bool shouldSaveConfig = false;
-    wm.setSaveConfigCallback([&shouldSaveConfig](){
-      shouldSaveConfig = true;
-    });
-
-    if (wm.autoConnect(apName.c_str())) {
-      if (drd != nullptr) {
-        drd->stop();  // Clear double-reset flag after successful connection
-      }
-      if (shouldSaveConfig) {
-        const char* newName = custom_device_name.getValue();
-        strcpy(deviceName, newName);
-        updateTopicBase();
-        saveDeviceName(deviceName);
-      }
-    }
-    return;
-  }
-
-  // We have saved credentials - attempt connection with retries
-  Serial.printf("[WiFi] Connecting to saved network: %s\n", WiFi.SSID().c_str());
+  // Try to connect with auto-connect (uses stored credentials if available)
+  WiFi.begin();
 
   // For deep sleep devices: retry without starting portal on failure
   if (deepSleepSeconds > 0) {
@@ -1032,7 +1071,9 @@ void setupWiFi() {
     for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       Serial.printf("[WiFi] Connection attempt %d/%d...\n", attempt, MAX_RETRIES);
 
-      WiFi.begin();  // Use saved credentials
+      if (attempt > 1) {
+        WiFi.begin();  // Retry connection (first attempt already started above)
+      }
 
       unsigned long startAttempt = millis();
       while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < RETRY_TIMEOUT_MS) {
@@ -1107,14 +1148,19 @@ void setup() {
 
   // Serial port for debugging
   Serial.begin(115200);
+
+  // Check reset counter and crash loop FIRST (before any delays or filesystem access)
+  #ifdef ESP32
+  checkResetCounter();
+  #endif
+
   delay(1000);
 
-  // Mount filesystem FIRST - required for DoubleResetDetector and config files
+  // Mount filesystem - required for config files
   bool filesystemMounted = false;
 #ifdef ESP32
   if (!SPIFFS.begin(true)) {
     Serial.println("[FS] CRITICAL: Failed to mount SPIFFS");
-    Serial.println("[DRD] WARNING: Double Reset Detector will not function without filesystem");
   } else {
     Serial.println("[FS] SPIFFS mounted successfully");
     filesystemMounted = true;
@@ -1122,7 +1168,6 @@ void setup() {
 #else
   if (!LittleFS.begin()) {
     Serial.println("[FS] CRITICAL: Failed to mount LittleFS");
-    Serial.println("[DRD] WARNING: Double Reset Detector will not function without filesystem");
   } else {
     Serial.println("[FS] LittleFS mounted successfully");
     filesystemMounted = true;
@@ -1133,22 +1178,23 @@ void setup() {
   // Reducing CPU frequency can cause timing issues and slow OTA transfers
   Serial.println("[POWER] CPU running at full speed - using deep sleep for power management");
 
-  // Initialize Double Reset Detector (only if filesystem is available)
-  if (filesystemMounted) {
-    static DoubleResetDetector drdInstance(DRD_TIMEOUT, DRD_ADDRESS);
-    drd = &drdInstance;
-    Serial.println("[DRD] Double Reset Detector initialized");
-  } else {
-    drd = nullptr;
-    Serial.println("[DRD] Double Reset Detector disabled - filesystem unavailable");
+  // Check if config portal should start (NVS-based reset detection on ESP32)
+  bool shouldStartConfigPortal = false;
+  #ifdef ESP32
+  if (strcmp(configPortalReason, "triple_reset") == 0 || strcmp(configPortalReason, "crash_recovery") == 0) {
+    shouldStartConfigPortal = true;
   }
+  #endif
 
-  // Check for double reset IMMEDIATELY (before slow WiFi/MQTT setup)
-  // This must happen within the DRD timeout window
-  if (drd != nullptr && drd->detectDoubleReset()) {
+  // Check for triple-reset IMMEDIATELY (before slow WiFi/MQTT setup)
+  if (shouldStartConfigPortal) {
     Serial.println();
     Serial.println("========================================");
-    Serial.println("  DOUBLE RESET DETECTED");
+    #ifdef ESP32
+    Serial.printf("  CONFIG PORTAL TRIGGERED: %s\n", configPortalReason);
+    #else
+    Serial.println("  CONFIG PORTAL TRIGGERED");
+    #endif
     Serial.println("  Starting WiFi Configuration Portal");
     Serial.println("========================================");
     Serial.println();
@@ -1175,9 +1221,6 @@ void setup() {
     });
 
     if (wm.startConfigPortal(apName.c_str())) {
-      if (drd != nullptr) {
-        drd->stop();  // Clear double-reset flag after successful config
-      }
       if (shouldSaveConfig) {
         const char* newName = custom_device_name.getValue();
         strcpy(deviceName, newName);
@@ -1192,9 +1235,6 @@ void setup() {
     } else {
       Serial.println("[WiFi] Configuration portal timeout or cancelled");
       Serial.println("[WiFi] Continuing with existing configuration...");
-      if (drd != nullptr) {
-        drd->stop();  // Clear flag even if portal was cancelled
-      }
     }
   }
 
@@ -1302,19 +1342,44 @@ void setup() {
 
   // If deep sleep is enabled, publish immediately and wait for MQTT commands
   if (deepSleepSeconds > 0) {
-    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - publishing and waiting for commands");
+    Serial.println("[DEEP SLEEP] Deep sleep mode enabled - strict sequential wake flow");
+    Serial.println("[DEEP SLEEP] Step 1/4: Waiting for WiFi connection...");
 
-    // Ensure MQTT is connected before publishing
-    if (!ensureMqttConnected()) {
-      Serial.println("[DEEP SLEEP] MQTT connection failed - staying awake to retry");
+    // STEP 1: Wait for WiFi (BLOCKING - nothing proceeds until WiFi is connected)
+    unsigned long wifiWaitStart = millis();
+    int dotCount = 0;
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifiWaitStart) < 10000) {
+      delay(100);
+      if (++dotCount % 10 == 0) {  // Print dot every second
+        Serial.print(".");
+      }
+    }
+    Serial.println();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[DEEP SLEEP] ERROR: WiFi connection failed after 10s - staying awake to retry");
       lastPublishTime = millis();
       return;
     }
+    Serial.printf("[DEEP SLEEP] ✓ WiFi connected to %s (IP: %s, RSSI: %d dBm)\n", 
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-    // Read temperature before publishing
+    // STEP 2: Connect to MQTT broker
+    Serial.println("[DEEP SLEEP] Step 2/4: Connecting to MQTT broker...");
+    if (!ensureMqttConnected()) {
+      Serial.println("[DEEP SLEEP] ERROR: MQTT connection failed - staying awake to retry");
+      lastPublishTime = millis();
+      return;
+    }
+    Serial.println("[DEEP SLEEP] ✓ MQTT connected");
+
+    // STEP 3: Read temperature sensor
+    Serial.println("[DEEP SLEEP] Step 3/4: Reading temperature sensor...");
     updateTemperatures();
+    Serial.printf("[DEEP SLEEP] ✓ Temperature: %.2f°C\n", temperatureC);
 
-    // Publish immediately
+    // STEP 4: Publish to MQTT
+    Serial.println("[DEEP SLEEP] Step 4/4: Publishing to MQTT...");
     bool publishSuccess = publishTemperature();
     publishStatus();
     
@@ -1378,6 +1443,11 @@ void setup() {
       publishStatus();
       lastPublishTime = millis();
 
+  // Clear crash loop flag after successful boot
+  #ifdef ESP32
+  clearCrashLoop();
+  #endif
+
   Serial.println();
   Serial.println("========================================");
   Serial.println("     Setup Complete");
@@ -1386,11 +1456,6 @@ void setup() {
 }
 
 void loop() {
-  // Must call drd->loop() to keep double reset detection working (if available)
-  if (drd != nullptr) {
-    drd->loop();
-  }
-
   // Handle web requests first for responsiveness
   #if HTTP_SERVER_ENABLED
     server.handleClient();
@@ -1426,12 +1491,8 @@ void loop() {
 
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi disconnected, attempting reconnection...");
-      // Check if credentials exist before attempting reconnect
-      if (WiFi.SSID().length() > 0) {
-        WiFi.reconnect();
-      } else {
-        Serial.println("[WiFi] No stored credentials - skipping reconnect");
-      }
+      // Always attempt reconnect - WiFiManager handles credentials
+      WiFi.reconnect();
       metrics.wifiReconnects++;
       // Track how long we've been offline
       if (wifiDisconnectedSince == 0) {

@@ -114,4 +114,17 @@ static const unsigned long TEMPERATURE_READ_INTERVAL_MS = 30000;  // Read temper
 // Disables HTML dashboard (/). Saves memory and reduces bandwidth.
 // #define API_ENDPOINTS_ONLY
 
+// =============================================================================
+// RESET DETECTION & CRASH RECOVERY (NVS-based, ESP32 only)
+// =============================================================================
+#ifdef ESP32
+  // Triple-reset detector (for entering config portal)
+  #define RESET_DETECT_TIMEOUT 2       // 2 second window for triple-reset
+  #define RESET_COUNT_THRESHOLD 3      // Number of resets to trigger config portal
+
+  // Crash loop recovery
+  #define CRASH_LOOP_THRESHOLD 5       // 5 consecutive crashes triggers recovery mode
+  #define CRASH_LOOP_MAGIC 0xDEADBEEF  // Magic number to detect incomplete boots
+#endif
+
 #endif // DEVICE_CONFIG_H
