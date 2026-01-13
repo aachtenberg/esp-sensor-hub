@@ -5,7 +5,7 @@ Environmental monitoring sensor measuring temperature, humidity, and atmospheric
 ## Features
 
 - **BME280 Sensor**: Measures temperature, humidity, pressure, and calculates altitude
-- **Double Reset Detector**: Press reset twice within 10 seconds to enter WiFi configuration portal
+- **NVS-Based Reset Detection**: Press reset 3 times within 2 seconds to enter WiFi configuration portal (ESP32/ESP32-S3)
 - **WiFi Configuration**: WiFiManager portal for easy SSID/password configuration (AP at 192.168.4.1)
 - **MQTT Integration**: Publishes readings to MQTT broker with full device metrics
 - **Pressure Baseline Tracking**: Barometer-style weather tracking with pressure change trends
@@ -88,9 +88,10 @@ pio run -e esp32dev-battery-display-serial -t upload
 
 ### 3. WiFi Configuration
 
-**Method 1: Double Reset Detector (Recommended)**
-- Press the reset button twice within 10 seconds
+**Method 1: Triple-Reset Detection (Recommended)**
+- Press the reset button 3 times within 2 seconds
 - Device enters configuration portal automatically
+- Uses NVS (Preferences) for reliable detection across all ESP32 variants
 
 **Method 2: First Boot**
 - Device will create WiFi access point on first boot
