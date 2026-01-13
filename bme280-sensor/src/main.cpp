@@ -870,12 +870,13 @@ void setupOTA() {
 
 void setup() {
   Serial.begin(115200);
-  delay(2000);
 
 #ifdef ESP32
   // Check reset counter FIRST - must run before any delays or slow operations
   checkResetCounter();
 #endif
+  
+  delay(2000);
   
   // Mount filesystem (required for config storage)
 #ifdef ESP32
