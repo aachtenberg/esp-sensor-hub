@@ -590,6 +590,9 @@ pio run -e esp32dev -t upload
 - Sensors: BME280 (temperature, humidity, pressure, altitude)
 - Features: WiFiManager portal, MQTT publishing, OTA updates, health API
 - Deep sleep: Supported (same as temperature-sensor)
+- **Reset Detection**: NVS-based triple-reset (3 resets within 2 seconds)
+- **Crash Recovery**: 5 consecutive incomplete boots trigger safe mode
+- **Implementation**: Uses same NVS pattern as surveillance project (checkResetCounter + clearCrashLoop)
 
 ### Surveillance-arduino project - Arduino CLI Build
 
