@@ -41,8 +41,15 @@ static const unsigned long SENSOR_READ_INTERVAL_MS = 30000;   // Read sensor eve
 // BATTERY MONITORING (Optional)
 // =============================================================================
 // Complete battery setup with TP4056 charger: see docs/hardware/BATTERY_SETUP_GUIDE.md
-// Requires voltage divider on GPIO 34: Battery+ -> 10K -> GPIO34 -> 10K -> GND
-#ifdef ESP32
+// Voltage divider required: Battery+ -> 10K -> ADC_PIN -> 10K -> GND
+// 
+// ADC Pin Assignments:
+//   - ESP32 (original): GPIO 34 (ADC1_CH6)
+//   - ESP32-S3: GPIO 4 (ADC1_CH3) - Pin 34 does not exist on S3!
+//
+// IMPORTANT: Only enable battery monitoring on battery-powered builds
+// ESP32-S3 does NOT support battery monitoring by default (no ADC pin configured)
+#if defined(BATTERY_POWERED) && !defined(ESP32S3)
   #define BATTERY_MONITOR_ENABLED
 #endif
 
@@ -59,8 +66,16 @@ static const unsigned long SENSOR_READ_INTERVAL_MS = 30000;   // Read sensor eve
 #endif
 
 #ifdef BATTERY_MONITOR_ENABLED
-  #ifdef ESP32
-    static const int BATTERY_PIN = 34;           // ADC pin for battery voltage
+  #if defined(ESP32S3)
+    static const int BATTERY_PIN = 4;            // ESP32-S3: GPIO 4 (ADC1_CH3)
+    static const float VOLTAGE_DIVIDER = 2.0;    // Voltage divider ratio
+    static const float CALIBRATION = 1.134;      // Calibration factor
+    static const float ADC_MAX = 4095.0;         // 12-bit ADC
+    static const float REF_VOLTAGE = 3.3;        // ESP32-S3 reference voltage
+    static const float BATTERY_MIN_V = 3.0;      // 0% battery voltage
+    static const float BATTERY_MAX_V = 4.2;      // 100% battery voltage
+  #elif defined(ESP32)
+    static const int BATTERY_PIN = 34;           // ESP32: GPIO 34 (ADC1_CH6)
     static const float VOLTAGE_DIVIDER = 2.0;    // Voltage divider ratio
     static const float CALIBRATION = 1.134;      // Calibration factor
     static const float ADC_MAX = 4095.0;         // 12-bit ADC
@@ -68,7 +83,7 @@ static const unsigned long SENSOR_READ_INTERVAL_MS = 30000;   // Read sensor eve
     static const float BATTERY_MIN_V = 3.0;      // 0% battery voltage
     static const float BATTERY_MAX_V = 4.2;      // 100% battery voltage
   #else
-    #error "Battery monitoring is only supported on ESP32"
+    #error "Battery monitoring configuration missing for this platform"
   #endif
 #endif
 
@@ -98,6 +113,18 @@ static const float PRESSURE_SEA_LEVEL = 101325.0;
 //   - Sea level: 101.325 kPa (1013.25 hPa)
 //   - High altitude: ~98.0 kPa (980 hPa) for 200m elevation
 //   - Set to 0.0 to disable baseline tracking
+
+// =============================================================================
+// RESET DETECTION & CRASH RECOVERY (ESP32 Only)
+// =============================================================================
+#ifdef ESP32
+  #define RESET_DETECT_TIMEOUT 2       // 2 second window for triple-reset
+  // Allows time to press reset 3 times to trigger config portal
+  #define RESET_COUNT_THRESHOLD 3      // Number of resets to trigger config portal
+  // Pressing reset button 3 times within 2 seconds enters portal mode
+  #define CRASH_LOOP_THRESHOLD 5       // 5 consecutive crashes triggers recovery mode
+  #define CRASH_LOOP_MAGIC 0xDEADBEEF  // Magic number to detect incomplete boots
+#endif
 // Adjust via MQTT commands:
 //   - "calibrate" or "set_baseline": Use current reading
 //   - "baseline 980.0": Set specific value in hPa

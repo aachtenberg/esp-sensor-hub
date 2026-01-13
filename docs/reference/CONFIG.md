@@ -272,6 +272,25 @@ screen /dev/ttyUSB0 115200
    - Check WiFi signal strength (RSSI > -80dBm)
    - Reduce upload_speed in platformio.ini
 
+### Deep Sleep WiFi Issues
+
+**Symptoms**: Device loses WiFi credentials after deep sleep wake, enters captive portal every wake cycle
+
+1. **Credential Preservation** (Fixed in v1.0.26):
+   - Early firmware used `WiFi.disconnect(true)` which erases credentials
+   - Update to v1.0.26+ which uses `WiFi.disconnect(false)`
+   - Credentials persist across deep sleep cycles
+
+2. **Wake Cycle Spam** (Fixed in v1.0.28):
+   - Early firmware showed "[MQTT] WiFi not connected" spam
+   - Update to v1.0.28+ for clean sequential wake flow
+   - Proper WiFi connection before MQTT attempts
+
+3. **Platform-Specific Issues**:
+   - ESP8266: Deep sleep disabled by default (requires GPIO16→RST mod)
+   - ESP32: Full deep sleep support with NVS credential storage
+   - ESP32-S3: Use NVS (not RTC memory) for reset detection
+
 ### Memory Issues
 
 **Symptoms**: Device crashes, heap exhaustion, publish failures
@@ -303,5 +322,5 @@ See individual project documentation for detailed setup:
 
 ---
 
-**Last Updated**: December 24, 2025
-**Projects**: Temperature Sensor (8 devices) | Surveillance (1 device) | Solar Monitor (1 device)
+**Last Updated**: January 10, 2026
+**Projects**: Temperature Sensor (8 devices, v1.0.28 latest) | Surveillance (1 device) | Solar Monitor (1 device)

@@ -27,7 +27,7 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 ### Temperature Sensor (Active - 8 Devices)
 - **Hardware**: ESP8266/ESP32 + DS18B20 waterproof sensor
 - **Features**: MQTT, deep sleep, WiFiManager, optional OLED, OTA updates
-- **Status**: ✅ Production - 8 locations (v1.0.8-v1.1.0)
+- **Status**: ✅ Production - 8 locations (v1.0.28 latest, v1.0.8-v1.1.0 legacy)
 - **Docs**: [temperature-sensor/README.md](temperature-sensor/README.md)
 
 ### BME280 Sensor (Development)
@@ -36,8 +36,8 @@ Multi-device IoT monitoring platform for ESP32/ESP8266/ESP32-S3 with MQTT data p
 - **Status**: 🔧 Testing - Ready for deployment
 - **Docs**: [bme280-sensor/README.md](bme280-sensor/README.md)
 
-### Surveillance Camera (Active - 3 Devices)
-- **Hardware**: 2× ESP32-CAM-MB (OV2640), 1× ESP32-S3 (OV3660)
+### Surveillance Camera (Active - 1 Device)
+- **Hardware**: 1× ESP32-S3 (OV3660)
 - **Features**: MQTT events, web stream, camera presets, motion detection
 - **Status**: ✅ Production - Indoor/outdoor monitoring
 - **Docs**: [surveillance/README.md](surveillance/README.md)
