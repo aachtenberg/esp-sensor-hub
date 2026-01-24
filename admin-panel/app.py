@@ -154,7 +154,14 @@ def main():
     
     # Initialize and connect MQTT client
     mqtt_client = MQTTClient(socketio)
-    mqtt_client.connect()
+    try:
+        mqtt_client.connect()
+        logger.info("✓ MQTT client connected successfully")
+    except Exception as e:
+        logger.warning(f"⚠ MQTT connection failed: {e}")
+        logger.warning("Web interface will start but MQTT features unavailable")
+        logger.warning("Check MQTT_BROKER setting in .env file")
+        mqtt_client = None
     
     try:
         # Start Flask-SocketIO server
