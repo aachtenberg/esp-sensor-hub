@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP Sensor Hub - Admin Panel</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌡️ ESP Sensor Hub Admin Panel</h1>
+            <div class="mqtt-status">
+                <span id="mqtt-status-indicator" class="status-dot offline"></span>
+                <span id="mqtt-status-text">MQTT: Connecting to {{ mqtt_broker }}...</span>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Devices Section -->
+            <section class="devices-section">
+                <h2>📡 Devices</h2>
+                <div class="device-filter">
+                    <input type="text" id="device-filter" placeholder="Filter devices...">
+                    <select id="status-filter">
+                        <option value="all">All Status</option>
+                        <option value="online">Online</option>
+                        <option value="offline">Offline</option>
+                    </select>
+                </div>
+                <div id="devices-container" class="devices-grid">
+                    {% for device in devices %}
+                    <div class="device-card" data-device="{{ device.name }}">
+                        <div class="device-header">
+                            <h3>{{ device.name }}</h3>
+                            <span class="device-status offline">Offline</span>
+                        </div>
+                        <div class="device-info">
+                            <p><strong>Platform:</strong> {{ device.platform }}</p>
+                            <p><strong>Chip ID:</strong> {{ device.chip_id }}</p>
+                            <p><strong>IP:</strong> <span class="device-ip">{{ device.ip }}</span></p>
+                            <p><strong>Display:</strong> {{ device.display }}</p>
+                        </div>
+                        <div class="device-data">
+                            <p class="device-temp">--°C</p>
+                            <p class="device-last-seen">Last seen: Never</p>
+                        </div>
+                        <div class="device-controls">
+                            <button onclick="sendCommand('{{ device.name }}', 'status')" class="btn btn-info">📊 Status</button>
+                            <button onclick="sendCommand('{{ device.name }}', 'restart')" class="btn btn-warning">🔄 Restart</button>
+                            <button onclick="showDeepSleepModal('{{ device.name }}')" class="btn btn-sleep">😴 Sleep</button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <!-- MQTT Messages Section -->
+            <section class="messages-section">
+                <h2>📨 MQTT Messages</h2>
+                <div class="message-controls">
+                    <button onclick="clearMessages()" class="btn btn-danger">Clear</button>
+                    <label>
+                        <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+                    </label>
+                    <select id="message-filter">
+                        <option value="all">All Messages</option>
+                        <option value="temperature">Temperature</option>
+                        <option value="status">Status</option>
+                        <option value="events">Events</option>
+                        <option value="command">Commands</option>
+                    </select>
+                </div>
+                <div id="messages-container" class="messages-log"></div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Deep Sleep Modal -->
+    <div id="sleep-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeSleepModal()">&times;</span>
+            <h2>Configure Deep Sleep</h2>
+            <p>Device: <strong id="sleep-device-name"></strong></p>
+            <div class="form-group">
+                <label for="sleep-seconds">Sleep Duration (seconds):</label>
+                <input type="number" id="sleep-seconds" min="0" max="3600" value="30" step="10">
+                <small>Set to 0 to disable deep sleep</small>
+            </div>
+            <div class="modal-buttons">
+                <button onclick="sendDeepSleepCommand()" class="btn btn-primary">Apply</button>
+                <button onclick="closeSleepModal()" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
