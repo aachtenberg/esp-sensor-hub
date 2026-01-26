@@ -1,7 +1,7 @@
 """MQTT Client Handler for Admin Panel"""
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import paho.mqtt.client as mqtt
 from config import Config
 
@@ -34,14 +34,14 @@ class MQTTClient:
             self.socketio.emit('mqtt_status', {
                 'connected': True,
                 'broker': Config.MQTT_BROKER,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             })
         else:
             logger.error(f"Failed to connect to MQTT broker, return code {rc}")
             self.socketio.emit('mqtt_status', {
                 'connected': False,
                 'error': f'Connection failed with code {rc}',
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             })
     
     def on_disconnect(self, client, userdata, rc):
@@ -49,14 +49,16 @@ class MQTTClient:
         logger.warning(f"Disconnected from MQTT broker, return code {rc}")
         self.socketio.emit('mqtt_status', {
             'connected': False,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         })
     
     def on_message(self, client, userdata, msg):
         """Callback when MQTT message received"""
+        logger.info(f"[MQTT] Received message on topic: {msg.topic}")
         try:
             topic = msg.topic
             payload = msg.payload.decode('utf-8')
+            logger.debug(f"[MQTT] Payload: {payload[:100]}...")  # Log first 100 chars
             
             # Try to parse as JSON
             try:
@@ -73,7 +75,7 @@ class MQTTClient:
             message_data = {
                 'topic': topic,
                 'payload': payload_json,
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'device': device_name,
                 'type': message_type
             }
@@ -87,7 +89,7 @@ class MQTTClient:
                 self.device_states[device_name] = {}
             
             # Use device's timestamp from payload if available, otherwise use current time
-            device_timestamp = datetime.now().isoformat()
+            device_timestamp = datetime.now(timezone.utc).isoformat()
             if isinstance(payload_json, dict):
                 # Check for timestamp in payload (ESP devices send this)
                 if 'timestamp' in payload_json:
@@ -95,10 +97,10 @@ class MQTTClient:
                         # Convert milliseconds/seconds timestamp to ISO format
                         ts_value = payload_json['timestamp']
                         if ts_value > 1000000000000:  # Milliseconds
-                            device_timestamp = datetime.fromtimestamp(ts_value / 1000).isoformat()
+                            device_timestamp = datetime.fromtimestamp(ts_value / 1000, tz=timezone.utc).isoformat()
                         elif ts_value > 0:  # Seconds since boot - mark as stale
                             # This is uptime, not real time - use current time but mark it
-                            device_timestamp = datetime.now().isoformat()
+                            device_timestamp = datetime.now(timezone.utc).isoformat()
                     except (ValueError, OSError):
                         pass
             
@@ -107,20 +109,35 @@ class MQTTClient:
                 'timestamp': device_timestamp
             }
             
-            # Only update last_seen if this is a recent message
-            # If device_timestamp is current (not uptime), use it
-            if message_type in ['status', 'temperature']:  # Real-time messages
-                self.device_states[device_name]['last_seen'] = device_timestamp
+            # Always update last_seen when any message is received
+            # This tracks when the device last communicated in any way
+            self.device_states[device_name]['last_seen'] = device_timestamp
             
             # Emit to web clients
-            self.socketio.emit('mqtt_message', message_data)
+            # Use socketio.sleep(0) to ensure eventlet context switch
+            logger.info(f"[MQTT] Emitting mqtt_message event for device: {device_name}, topic: {message_type}")
+            logger.info(f"[MQTT] Event data: device={device_name}, topic={topic}, timestamp={message_data['timestamp']}")
+            
+            # Import eventlet for proper async handling
+            import eventlet
+            eventlet.sleep(0)  # Yield to eventlet
+            
+            self.socketio.emit('mqtt_message', message_data, namespace='/')
+            eventlet.sleep(0)
+            
+            logger.info(f"[MQTT] Emitting device_update event for device: {device_name}")
             self.socketio.emit('device_update', {
                 'device': device_name,
                 'state': self.device_states[device_name]
-            })
+            }, namespace='/')
+            eventlet.sleep(0)
+            
+            logger.info(f"[MQTT] Events emitted successfully")
             
         except Exception as e:
             logger.error(f"Error processing MQTT message: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def connect(self):
         """Connect to MQTT broker"""

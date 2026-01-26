@@ -7,7 +7,8 @@ Web-based administration panel for monitoring and controlling ESP32/ESP8266 temp
 - 📡 **Real-time Device Monitoring**: View all devices from inventory with live status updates
 - 📊 **Temperature Display**: Real-time temperature readings from all sensors
 - 🎛️ **Device Control**: Send commands (restart, deep sleep, status requests)
-- 📨 **MQTT Message Viewer**: Monitor all MQTT messages in real-time
+- 📨 **MQTT Message Viewer**: Monitor all MQTT messages in real-time with advanced filtering
+- 🔍 **Message Filtering**: Filter by topic, device, and message type
 - 🔌 **WebSocket Integration**: Live updates without page refresh
 - 🎨 **Dark Theme UI**: Modern, responsive interface
 
@@ -15,7 +16,7 @@ Web-based administration panel for monitoring and controlling ESP32/ESP8266 temp
 
 ### Dashboard
 - Device cards showing status, temperature, and controls
-- MQTT message log with filtering
+- MQTT message log with advanced filtering by topic, device, and type
 - Real-time connection status
 
 ## Requirements
@@ -145,9 +146,12 @@ All devices from `temperature-sensor/docs/DEVICE_INVENTORY.md` are automatically
 ### MQTT Message Log
 
 - View all incoming MQTT messages in real-time
-- Filter by message type (temperature, status, events, commands)
+- **Filter by message type**: temperature, status, events, commands
+- **Filter by device**: Select specific devices from dropdown
+- **Filter by topic**: Text input for partial topic matching
 - Auto-scroll option
 - Color-coded by message type
+- Real-time filtering without page refresh
 
 ## Architecture
 

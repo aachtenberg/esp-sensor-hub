@@ -1,10 +1,11 @@
 """ESP Sensor Hub - MQTT Admin Panel"""
 import logging
+import time
+import os
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 from mqtt_client import MQTTClient
 from config import Config
-import os
 import re
 
 # Configure logging
@@ -137,6 +138,144 @@ def get_messages():
     messages = mqtt_client.get_recent_messages() if mqtt_client else []
     return jsonify(messages)
 
+@app.route('/api/config', methods=['GET', 'POST'])
+def handle_config():
+    """API endpoint to get/set MQTT configuration"""
+    if request.method == 'GET':
+        # Return current MQTT configuration
+        return jsonify({
+            'broker': Config.MQTT_BROKER,
+            'port': Config.MQTT_PORT,
+            'username': Config.MQTT_USERNAME or '',
+            'password': ''  # Don't expose password
+        })
+    
+    elif request.method == 'POST':
+        # Update MQTT configuration
+        data = request.json
+        broker = data.get('broker', '').strip()
+        port = data.get('port', 1883)
+        username = data.get('username', '').strip() or None
+        password = data.get('password', '').strip() or None
+        
+        # Validate input
+        if not broker:
+            return jsonify({'success': False, 'error': 'Broker address required'}), 400
+        
+        try:
+            port = int(port)
+            if port < 1 or port > 65535:
+                raise ValueError("Port must be between 1 and 65535")
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'error': 'Invalid port number'}), 400
+        
+        # Test connection to new broker
+        try:
+            logger.info(f"Testing MQTT connection to {broker}:{port}")
+            import paho.mqtt.client as mqtt_test
+            
+            test_connected = {'success': False}
+            
+            def on_test_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    test_connected['success'] = True
+                client.disconnect()
+            
+            test_client = mqtt_test.Client(client_id="mqtt-admin-test")
+            test_client.on_connect = on_test_connect
+            
+            if username:
+                test_client.username_pw_set(username, password)
+            
+            # Try to connect with short timeout
+            try:
+                test_client.connect(broker, port, keepalive=5)
+                test_client.loop_start()
+                
+                # Wait for connection
+                import time
+                timeout = 5
+                start = time.time()
+                while not test_connected['success'] and (time.time() - start) < timeout:
+                    time.sleep(0.1)
+                
+                test_client.loop_stop()
+                test_client.disconnect()
+                
+                if not test_connected['success']:
+                    return jsonify({
+                        'success': False, 
+                        'error': 'Could not connect to MQTT broker'
+                    }), 400
+            except Exception as conn_err:
+                return jsonify({
+                    'success': False,
+                    'error': f'Connection failed: {str(conn_err)}'
+                }), 400
+            
+            # Update environment variables
+            os.environ['MQTT_BROKER'] = broker
+            os.environ['MQTT_PORT'] = str(port)
+            os.environ['MQTT_USERNAME'] = username or ''
+            os.environ['MQTT_PASSWORD'] = password or ''
+            
+            # Update Config class
+            Config.MQTT_BROKER = broker
+            Config.MQTT_PORT = port
+            Config.MQTT_USERNAME = username or ''
+            Config.MQTT_PASSWORD = password or ''
+            
+            # Update .env file
+            env_file = os.path.join(os.path.dirname(__file__), '.env')
+            update_env_file(env_file, {
+                'MQTT_BROKER': broker,
+                'MQTT_PORT': str(port),
+                'MQTT_USERNAME': username or '',
+                'MQTT_PASSWORD': password or ''
+            })
+            
+            # Reconnect MQTT client with new settings
+            global mqtt_client
+            if mqtt_client:
+                mqtt_client.disconnect()
+            mqtt_client = MQTTClient(socketio)
+            mqtt_client.connect()
+            
+            logger.info(f"✓ MQTT configuration updated: {broker}:{port}")
+            return jsonify({'success': True})
+            
+        except Exception as e:
+            logger.error(f"MQTT connection test failed: {e}")
+            return jsonify({'success': False, 'error': str(e)}), 400
+
+def update_env_file(env_file, updates):
+    """Update .env file with new configuration"""
+    lines = []
+    updated_keys = set()
+    
+    # Read existing file and update matching keys
+    if os.path.exists(env_file):
+        with open(env_file, 'r') as f:
+            for line in f:
+                updated = False
+                for key, value in updates.items():
+                    if line.startswith(f"{key}="):
+                        lines.append(f"{key}={value}\n")
+                        updated_keys.add(key)
+                        updated = True
+                        break
+                if not updated:
+                    lines.append(line)
+    
+    # Add any new keys that weren't in the file
+    for key, value in updates.items():
+        if key not in updated_keys:
+            lines.append(f"{key}={value}\n")
+    
+    # Write updated file
+    with open(env_file, 'w') as f:
+        f.writelines(lines)
+
 @app.route('/api/command', methods=['POST'])
 def send_command():
     """API endpoint to send command to device"""
@@ -156,20 +295,33 @@ def send_command():
 @socketio.on('connect')
 def handle_connect():
     """Handle WebSocket client connection"""
-    logger.info('WebSocket client connected')
+    logger.info(f'WebSocket client connected, SID: {request.sid}')
     
-    # Send current device states
+    # Send current device states and MQTT connection status
     if mqtt_client:
         device_states = mqtt_client.get_device_states()
         emit('initial_state', {
             'devices': device_states,
-            'messages': mqtt_client.get_recent_messages()
+            'messages': mqtt_client.get_recent_messages(),
+            'mqtt_connected': mqtt_client.client.is_connected()
         })
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle WebSocket client disconnection"""
     logger.info('WebSocket client disconnected')
+
+@socketio.on('request_state')
+def handle_request_state():
+    """Handle client request for fresh state (polling workaround)"""
+    logger.info('Client requested fresh state')
+    if mqtt_client:
+        device_states = mqtt_client.get_device_states()
+        emit('initial_state', {
+            'devices': device_states,
+            'messages': mqtt_client.get_recent_messages(),
+            'mqtt_connected': mqtt_client.client.is_connected()
+        })
 
 @socketio.on('send_command')
 def handle_command(data):
