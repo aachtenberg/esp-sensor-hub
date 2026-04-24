@@ -1,12 +1,12 @@
 /**
- * OLED Display Module for ESP32 Solar Monitor
- * 
+ * OLED Display Module for ESP32-S3 Solar Monitor
+ *
  * Hardware: SSD1306 0.96" 128x64 I2C OLED Display
  * Library: U8g2
- * 
- * I2C Connections:
+ *
+ * I2C Connections (ESP32-S3 — GPIO 22 does not exist on S3):
  * - SDA: GPIO 21
- * - SCL: GPIO 22
+ * - SCL: GPIO 9
  * - VCC: 3.3V
  * - GND: GND
  */
@@ -28,7 +28,7 @@
 // Display configuration
 #define DISPLAY_I2C_ADDRESS 0x3C
 #define DISPLAY_SDA_PIN 21
-#define DISPLAY_SCL_PIN 22
+#define DISPLAY_SCL_PIN 9
 
 // Display update interval (ms)
 #define DISPLAY_UPDATE_INTERVAL 1000
@@ -43,8 +43,8 @@ enum DisplayPage {
 };
 
 // Display instance - SSD1306 128x64 I2C
-// Using hardware I2C (U8G2_R0 = no rotation)
-extern U8G2_SSD1306_128X64_NONAME_F_HW_I2C display;
+// Using software (bit-banged) I2C — U8g2's HW_I2C driver hangs on ESP32-S3
+extern U8G2_SSD1306_128X64_NONAME_F_SW_I2C display;
 
 // Current display page
 extern DisplayPage currentPage;

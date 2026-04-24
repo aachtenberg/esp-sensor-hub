@@ -1,16 +1,17 @@
 /**
- * ESP32 Solar Monitor
+ * ESP32-S3 Solar Monitor
  *
  * WiFi-enabled monitoring for Victron solar equipment:
  * - SmartShunt SHU050150050 (battery monitor)
  * - SmartSolar MPPT x2 (charge controllers)
  *
  * Hardware:
- * - ESP32-WROOM-32
+ * - Freenove ESP32-S3-WROOM
  * - GPIO 16 (UART2 RX) <- SmartShunt TX
- * - GPIO 19 (UART1 RX) <- MPPT1 TX
+ * - GPIO 17 (UART1 RX) <- MPPT1 TX
  * - GPIO 18 (SoftwareSerial RX) <- MPPT2 TX
  * - VE.Direct: 19200 baud, 3.3V TTL
+ * Note: GPIO 19/20 avoided — reserved for native USB D-/D+ on ESP32-S3.
  *
  * API Endpoints:
  * - GET /           - HTML dashboard
@@ -23,10 +24,11 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
+#include <PubSubClient.h>
 #include <SoftwareSerial.h>
 #include <WiFiManager.h>
 #include <ESP_DoubleResetDetector.h>
+#include <ArduinoOTA.h>
 
 // Filesystem for device name storage
 #ifdef ESP32
@@ -50,16 +52,16 @@
 DoubleResetDetector* drd;
 
 // Device name storage
-char deviceName[40] = "Solar Monitor";
+char deviceName[40] = "Solar-Monitor-Garage";
 const char* DEVICE_NAME_FILE = "/device_name.txt";
 
 // ============================================================================
 // Configuration
 // ============================================================================
 
-// UART Pin assignments
+// UART Pin assignments (ESP32-S3 — avoid GPIO 19/20 reserved for native USB)
 #define SMARTSHUNT_RX_PIN 16  // GPIO 16 - UART2 RX
-#define MPPT1_RX_PIN 19       // GPIO 19 - UART1 RX
+#define MPPT1_RX_PIN 17       // GPIO 17 - UART1 RX
 #define MPPT2_RX_PIN 18       // GPIO 18 - SoftwareSerial RX
 
 // VE.Direct baud rate
@@ -101,27 +103,42 @@ unsigned long bootTime = 0;
 
 void loadDeviceName();
 void saveDeviceName(const char* name);
-void sendEventToInfluxDB(const String& eventType, const String& message, const String& severity = "info");
+void publishEvent(const String& eventType, const String& message, const String& severity = "info");
 void setupWiFi();
+void setupOTA();
 void setupWebServer();
 void handleRoot();
 void handleBatteryData();
 void handleSolarData();
 void handleSystemData();
 void printStatus();
-void sendDataToInfluxDB();
+void publishDataToMqtt();
+String generateChipId();
+String sanitizeDeviceName(const char* name);
+void updateTopicBase();
+bool ensureMqttConnected();
+bool publishJson(const String& topic, JsonDocument& doc, bool retain = false);
 
 // ============================================================================
-// InfluxDB Configuration
+// MQTT Configuration
 // ============================================================================
 
-// Data sending interval (ms)
-#define INFLUXDB_SEND_INTERVAL 30000  // Send data every 30 seconds
-#define HTTP_TIMEOUT_MS 5000          // HTTP timeout for InfluxDB requests
+#define MQTT_PUBLISH_INTERVAL_MS          30000   // Publish sensor data every 30s
+#define MQTT_RECONNECT_INTERVAL_MS        5000
+#define MQTT_STALE_CONNECTION_TIMEOUT_MS  120000  // Force reconnect if no successful publish in 2 min
+#define MQTT_SOCKET_TIMEOUT_SEC           5
+#define MQTT_BUFFER_SIZE                  1024    // Needs to hold largest payload (solar JSON)
 
-// Status tracking
-unsigned long lastInfluxDBSend = 0;
-int influxDBFailureCount = 0;
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+String chipId;          // MAC-derived, set in setup()
+String topicBase;       // "esp-sensor-hub/<sanitized-device>"
+
+unsigned long lastMqttPublish = 0;
+unsigned long lastMqttReconnectAttempt = 0;
+unsigned long lastSuccessfulMqttPublish = 0;
+int mqttPublishFailures = 0;
 
 // ============================================================================
 // Device Name Management
@@ -169,44 +186,103 @@ void saveDeviceName(const char* name) {
 }
 
 // ============================================================================
-// Event Logging to InfluxDB
+// MQTT Plumbing
 // ============================================================================
 
-void sendEventToInfluxDB(const String& eventType, const String& message, const String& severity) {
+String generateChipId() {
+    uint64_t mac = ESP.getEfuseMac();
+    char buf[13];
+    snprintf(buf, sizeof(buf), "%012llX", mac);
+    return String(buf);
+}
+
+String sanitizeDeviceName(const char* name) {
+    String s(name);
+    s.replace(" ", "-");
+    return s;
+}
+
+void updateTopicBase() {
+    topicBase = String("esp-sensor-hub/") + sanitizeDeviceName(deviceName);
+}
+
+bool ensureMqttConnected() {
     if (WiFi.status() != WL_CONNECTED) {
-        return;  // Skip if WiFi not connected
+        return false;
     }
 
-    HTTPClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
+    // Stale-connection watchdog: if connected but no successful publish in 2 min, force reconnect
+    if (mqttClient.connected()) {
+        unsigned long now = millis();
+        if (lastSuccessfulMqttPublish > 0 &&
+            (now - lastSuccessfulMqttPublish) > MQTT_STALE_CONNECTION_TIMEOUT_MS) {
+            Serial.println("[MQTT] Stale connection - forcing reconnect");
+            mqttClient.disconnect();
+            // fall through to reconnect
+        } else {
+            return true;
+        }
+    }
 
-    String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + INFLUXDB_ORG + "&bucket=" + INFLUXDB_BUCKET;
-    http.begin(url);
-    http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
-    http.addHeader("Content-Type", "text/plain; charset=utf-8");
+    unsigned long now = millis();
+    if (lastMqttReconnectAttempt > 0 &&
+        (now - lastMqttReconnectAttempt) < MQTT_RECONNECT_INTERVAL_MS) {
+        return false;
+    }
+    lastMqttReconnectAttempt = now;
 
-    // Replace spaces with underscores in device name for tag value
-    String deviceTag = String(deviceName);
-    deviceTag.replace(" ", "_");
+    String clientId = sanitizeDeviceName(deviceName) + "-" + chipId;
+    Serial.printf("[MQTT] Connecting to %s:%d as %s\n", MQTT_BROKER, MQTT_PORT, clientId.c_str());
 
-    // Build line protocol: measurement,tags fields
-    String data = "device_events,";
-    data += "device=" + deviceTag + ",";
-    data += "board=esp32,";
-    data += "event_type=" + eventType + ",";
-    data += "severity=" + severity + " ";
-    data += "message=\"" + message + "\",";
-    data += "value=1";
-
-    int httpCode = http.POST(data);
-    
-    if (httpCode == 204 || httpCode == 200) {
-        Serial.println("[Event] Logged: " + eventType + " - " + message);
+    bool connected;
+    if (strlen(MQTT_USER) == 0) {
+        connected = mqttClient.connect(clientId.c_str());
     } else {
-        Serial.printf("[Event] Failed to log: %d\n", httpCode);
+        connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD);
     }
 
-    http.end();
+    if (connected) {
+        Serial.println("[MQTT] Connected");
+    } else {
+        Serial.printf("[MQTT] Connect failed, state=%d, retry in %lus\n",
+                      mqttClient.state(), MQTT_RECONNECT_INTERVAL_MS / 1000);
+        mqttPublishFailures++;
+    }
+    return connected;
+}
+
+bool publishJson(const String& topic, JsonDocument& doc, bool retain) {
+    if (!ensureMqttConnected()) {
+        return false;
+    }
+    String payload;
+    serializeJson(doc, payload);
+    bool ok = mqttClient.publish(topic.c_str(), payload.c_str(), retain);
+    if (ok) {
+        lastSuccessfulMqttPublish = millis();
+    } else {
+        mqttPublishFailures++;
+        Serial.printf("[MQTT] Publish failed on %s (len=%d)\n", topic.c_str(), payload.length());
+    }
+    return ok;
+}
+
+void publishEvent(const String& eventType, const String& message, const String& severity) {
+    StaticJsonDocument<384> doc;
+    doc["device"] = deviceName;
+    doc["chip_id"] = chipId;
+    doc["event"] = eventType;
+    doc["severity"] = severity;
+    doc["timestamp"] = millis() / 1000;
+    doc["uptime_seconds"] = (millis() - bootTime) / 1000;
+    doc["free_heap"] = ESP.getFreeHeap();
+    if (message.length() > 0) {
+        doc["message"] = message;
+    }
+    bool ok = publishJson(topicBase + "/events", doc, false);
+    if (ok) {
+        Serial.println("[Event] " + eventType + " - " + message);
+    }
 }
 
 // ============================================================================
@@ -220,20 +296,31 @@ void setup() {
 
     Serial.println();
     Serial.println("========================================");
-    Serial.println("     ESP32 Solar Monitor");
+    Serial.println("     ESP32-S3 Solar Monitor");
     Serial.println("========================================");
     Serial.println();
 
     bootTime = millis();
 
+    // Derive chip ID from MAC (used for MQTT client ID and payload tagging)
+    chipId = generateChipId();
+    Serial.printf("[Device] Chip ID: %s\n", chipId.c_str());
+
     // Load device name from filesystem
     loadDeviceName();
+    updateTopicBase();
+    Serial.printf("[MQTT] Topic base: %s\n", topicBase.c_str());
+
+    // Configure MQTT client
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
+    mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
 
     // Initialize VE.Direct serial ports (RX only, TX pin = -1)
     Serial.println("[UART] Initializing SmartShunt on GPIO 16...");
     shuntSerial.begin(VEDIRECT_BAUD, SERIAL_8N1, SMARTSHUNT_RX_PIN, -1);
 
-    Serial.println("[UART] Initializing MPPT1 on GPIO 19...");
+    Serial.println("[UART] Initializing MPPT1 on GPIO 17...");
     mppt1Serial.begin(VEDIRECT_BAUD, SERIAL_8N1, MPPT1_RX_PIN, -1);
 
     Serial.println("[UART] Initializing MPPT2 on GPIO 18 (SoftwareSerial)...");
@@ -249,6 +336,11 @@ void setup() {
 
     // Connect to WiFi
     setupWiFi();
+
+    // Setup OTA (ArduinoOTA) — only useful once WiFi is up
+    if (WiFi.status() == WL_CONNECTED) {
+        setupOTA();
+    }
 
     // Setup web server
     setupWebServer();
@@ -271,9 +363,9 @@ void setup() {
             default: resetReason = "Unknown"; break;
         }
     #endif
-    String bootMsg = "Device started - Reset reason: " + resetReason + 
-                     ", Uptime: 0s, Free heap: " + String(ESP.getFreeHeap()) + " bytes";
-    sendEventToInfluxDB("device_boot", bootMsg, "info");
+    String bootMsg = "Device started - Reset reason: " + resetReason +
+                     ", Free heap: " + String(ESP.getFreeHeap()) + " bytes";
+    publishEvent("device_boot", bootMsg, "info");
 
     Serial.println();
     Serial.println("========================================");
@@ -290,6 +382,9 @@ void loop() {
     // Must call drd->loop() to keep double reset detection working
     drd->loop();
 
+    // Service OTA updates
+    ArduinoOTA.handle();
+
     // Check WiFi connection and log reconnects
     static int reconnectCount = 0;
     static bool wasConnected = false;
@@ -301,7 +396,7 @@ void loop() {
         // Log every 5th reconnect attempt to avoid spam
         if (reconnectCount % 5 == 1) {
             String msg = "WiFi disconnected, reconnect attempt #" + String(reconnectCount);
-            sendEventToInfluxDB("wifi_reconnect", msg, "warning");
+            publishEvent("wifi_reconnect", msg, "warning");
         }
     } else if (isConnected && !wasConnected) {
         // WiFi reconnected
@@ -327,7 +422,7 @@ void loop() {
         lastSmartShuntData = now;
         smartShuntErrorLogged = false;
     } else if (!smartShuntErrorLogged && now - lastSmartShuntData > 60000) {
-        sendEventToInfluxDB("sensor_error", "SmartShunt no data for 60+ seconds", "error");
+        publishEvent("sensor_error", "SmartShunt no data for 60+ seconds", "error");
         smartShuntErrorLogged = true;
     }
     
@@ -335,7 +430,7 @@ void loop() {
         lastMppt1Data = now;
         mppt1ErrorLogged = false;
     } else if (!mppt1ErrorLogged && now - lastMppt1Data > 60000) {
-        sendEventToInfluxDB("sensor_error", "MPPT1 no data for 60+ seconds", "error");
+        publishEvent("sensor_error", "MPPT1 no data for 60+ seconds", "error");
         mppt1ErrorLogged = true;
     }
     
@@ -343,12 +438,16 @@ void loop() {
         lastMppt2Data = now;
         mppt2ErrorLogged = false;
     } else if (!mppt2ErrorLogged && now - lastMppt2Data > 60000) {
-        sendEventToInfluxDB("sensor_error", "MPPT2 no data for 60+ seconds", "error");
+        publishEvent("sensor_error", "MPPT2 no data for 60+ seconds", "error");
         mppt2ErrorLogged = true;
     }
 
     // Handle web requests
     server.handleClient();
+
+    // Service MQTT (reconnect if needed, process incoming packets)
+    ensureMqttConnected();
+    mqttClient.loop();
 
     // Periodic status output
     if (millis() - lastStatusPrint >= STATUS_INTERVAL) {
@@ -356,10 +455,10 @@ void loop() {
         lastStatusPrint = millis();
     }
 
-    // Periodic InfluxDB data sending
-    if (millis() - lastInfluxDBSend >= INFLUXDB_SEND_INTERVAL) {
-        sendDataToInfluxDB();
-        lastInfluxDBSend = millis();
+    // Periodic MQTT publish of sensor data
+    if (millis() - lastMqttPublish >= MQTT_PUBLISH_INTERVAL_MS) {
+        publishDataToMqtt();
+        lastMqttPublish = millis();
     }
 
     // Update OLED display periodically
@@ -463,14 +562,15 @@ void setupWiFi() {
                 strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
                 deviceName[sizeof(deviceName) - 1] = '\0';
                 saveDeviceName(deviceName);
-                
-                String msg = "Name: '" + oldDeviceName + "' -> '" + String(deviceName) + "', SSID: " + 
+                updateTopicBase();
+
+                String msg = "Name: '" + oldDeviceName + "' -> '" + String(deviceName) + "', SSID: " +
                             WiFi.SSID() + ", IP: " + WiFi.localIP().toString();
-                sendEventToInfluxDB("device_configured", msg, "info");
+                publishEvent("device_configured", msg, "info");
             } else {
                 String msg = "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + 
                             WiFi.localIP().toString() + ", Name unchanged: " + String(deviceName);
-                sendEventToInfluxDB("device_configured", msg, "info");
+                publishEvent("device_configured", msg, "info");
             }
         }
     } else {
@@ -493,14 +593,15 @@ void setupWiFi() {
                 strncpy(deviceName, newName.c_str(), sizeof(deviceName) - 1);
                 deviceName[sizeof(deviceName) - 1] = '\0';
                 saveDeviceName(deviceName);
-                
-                String msg = "Name: '" + oldDeviceName + "' -> '" + String(deviceName) + "', SSID: " + 
+                updateTopicBase();
+
+                String msg = "Name: '" + oldDeviceName + "' -> '" + String(deviceName) + "', SSID: " +
                             WiFi.SSID() + ", IP: " + WiFi.localIP().toString();
-                sendEventToInfluxDB("device_configured", msg, "info");
+                publishEvent("device_configured", msg, "info");
             } else if (WiFi.status() == WL_CONNECTED) {
                 String msg = "WiFi reconfigured - SSID: " + WiFi.SSID() + ", IP: " + 
                             WiFi.localIP().toString() + ", Name unchanged: " + String(deviceName);
-                sendEventToInfluxDB("device_configured", msg, "info");
+                publishEvent("device_configured", msg, "info");
             }
         }
     }
@@ -522,10 +623,55 @@ void setupWiFi() {
         
         // Log WiFi connection event
         String msg = "Connected to " + WiFi.SSID() + " with IP " + WiFi.localIP().toString();
-        sendEventToInfluxDB("wifi_connected", msg, "info");
+        publishEvent("wifi_connected", msg, "info");
     } else {
         Serial.println("[WiFi] Not connected - running in offline mode");
     }
+}
+
+// ============================================================================
+// OTA Setup (ArduinoOTA — push firmware from PlatformIO over WiFi)
+// ============================================================================
+
+void setupOTA() {
+    ArduinoOTA.setHostname(deviceName);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+
+    ArduinoOTA.onStart([]() {
+        String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+        Serial.println("[OTA] Update started: " + type);
+        publishEvent("ota_start", "OTA update starting (" + type + ")", "warning");
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("[OTA] Update complete");
+        publishEvent("ota_complete", "OTA update completed successfully", "info");
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        static unsigned int lastPercent = 0;
+        if (total == 0) return;
+        unsigned int percent = (progress / (total / 100));
+        if (percent != lastPercent && percent % 25 == 0) {
+            Serial.printf("[OTA] Progress: %u%%\n", percent);
+            lastPercent = percent;
+        }
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        String errorMsg;
+        if      (error == OTA_AUTH_ERROR)    errorMsg = "Auth Failed";
+        else if (error == OTA_BEGIN_ERROR)   errorMsg = "Begin Failed";
+        else if (error == OTA_CONNECT_ERROR) errorMsg = "Connect Failed";
+        else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
+        else if (error == OTA_END_ERROR)     errorMsg = "End Failed";
+        else                                 errorMsg = "Unknown";
+        Serial.printf("[OTA] Error[%u]: %s\n", error, errorMsg.c_str());
+        publishEvent("ota_error", "OTA update failed: " + errorMsg, "error");
+    });
+
+    ArduinoOTA.begin();
+    Serial.printf("[OTA] Ready — hostname: %s\n", deviceName);
 }
 
 // ============================================================================
@@ -887,144 +1033,91 @@ void printStatus() {
 }
 
 // ============================================================================
-// InfluxDB Data Sending
+// MQTT Data Publishing
 // ============================================================================
-
-void sendDataToInfluxDB() {
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[InfluxDB] WiFi not connected, skipping data send");
+//
+// Topics (consumed by Telegraf → TimescaleDB):
+//   esp-sensor-hub/<device>/battery   — SmartShunt snapshot (JSON, QoS0, not retained)
+//   esp-sensor-hub/<device>/solar     — Both MPPTs in one payload (JSON, QoS0, not retained)
+//   esp-sensor-hub/<device>/status    — Device health (JSON, QoS0, retained)
+//   esp-sensor-hub/<device>/events    — Event log (JSON, QoS0, not retained) — see publishEvent
+//
+void publishDataToMqtt() {
+    if (!ensureMqttConnected()) {
+        Serial.println("[MQTT] Skipping publish (not connected)");
         return;
     }
 
-    HTTPClient http;
-    http.setTimeout(5000);  // 5 second timeout
+    int published = 0;
 
-    // Build InfluxDB URL with authentication
-    String url = String(INFLUXDB_URL) + "/api/v2/write?org=" + INFLUXDB_ORG + "&bucket=" + INFLUXDB_BUCKET;
-    http.begin(url);
-    http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
-    http.addHeader("Content-Type", "text/plain; charset=utf-8");
-
-    // Build line protocol data
-    String data = "";
-
-    // Battery data (SmartShunt)
+    // Battery (SmartShunt)
     if (smartShunt.isDataValid()) {
-        // Replace spaces with underscores in device name for tag value
-        String deviceTag = String(deviceName);
-        deviceTag.replace(" ", "_");
-        
-        data += "battery,device=" + deviceTag + ",location=garage ";
-        data += "voltage=" + String(smartShunt.getBatteryVoltage(), 3) + ",";
-        data += "current=" + String(smartShunt.getBatteryCurrent(), 3) + ",";
-        data += "soc=" + String(smartShunt.getStateOfCharge(), 1) + ",";
-        data += "time_remaining=" + String(smartShunt.getTimeRemaining()) + ",";
-        data += "consumed_ah=" + String(smartShunt.getConsumedAh(), 3) + ",";
-        data += "alarm=" + String(smartShunt.getAlarmState() ? 1 : 0) + ",";
-        data += "relay=" + String(smartShunt.getRelayState() ? 1 : 0) + ",";
-        data += "min_voltage=" + String(smartShunt.getMinVoltage(), 3) + ",";
-        data += "max_voltage=" + String(smartShunt.getMaxVoltage(), 3) + ",";
-        data += "charge_cycles=" + String(smartShunt.getChargeCycles()) + ",";
-        data += "deepest_discharge=" + String(smartShunt.getDeepestDischarge(), 3) + ",";
-        data += "last_discharge=" + String(smartShunt.getLastDischarge(), 3);
-        data += "\n";
+        StaticJsonDocument<512> doc;
+        doc["device"]            = deviceName;
+        doc["chip_id"]           = chipId;
+        doc["timestamp"]         = millis() / 1000;
+        doc["voltage"]           = smartShunt.getBatteryVoltage();
+        doc["current"]           = smartShunt.getBatteryCurrent();
+        doc["soc"]               = smartShunt.getStateOfCharge();
+        doc["time_remaining"]    = smartShunt.getTimeRemaining();
+        doc["consumed_ah"]       = smartShunt.getConsumedAh();
+        doc["alarm"]             = smartShunt.getAlarmState();
+        doc["relay"]             = smartShunt.getRelayState();
+        doc["min_voltage"]       = smartShunt.getMinVoltage();
+        doc["max_voltage"]       = smartShunt.getMaxVoltage();
+        doc["charge_cycles"]     = smartShunt.getChargeCycles();
+        doc["deepest_discharge"] = smartShunt.getDeepestDischarge();
+        doc["last_discharge"]    = smartShunt.getLastDischarge();
+        if (publishJson(topicBase + "/battery", doc, false)) published++;
     }
 
-    // Solar data (MPPT1)
-    if (mppt1.isDataValid()) {
-        String deviceTag = String(deviceName);
-        deviceTag.replace(" ", "_");
+    // Solar (both MPPTs in a single payload, nested objects per unit)
+    if (mppt1.isDataValid() || mppt2.isDataValid()) {
+        StaticJsonDocument<1024> doc;
+        doc["device"]    = deviceName;
+        doc["chip_id"]   = chipId;
+        doc["timestamp"] = millis() / 1000;
 
-        // Add product_id and serial as tags if available
-        String tags = "solar,device=" + deviceTag + ",location=garage,mppt=1";
-        if (mppt1.getProductID().length() > 0) {
-            tags += ",product_id=" + mppt1.getProductID();
-        }
-        if (mppt1.getSerialNumber().length() > 0) {
-            String serial = mppt1.getSerialNumber();
-            serial.replace(" ", "_");
-            tags += ",serial=" + serial;
-        }
+        auto fillMppt = [](JsonObject obj, VictronMPPT& m) {
+            obj["pv_voltage"]          = m.getPanelVoltage();
+            obj["pv_power"]            = m.getPanelPower();
+            obj["battery_voltage"]     = m.getBatteryVoltage();
+            obj["charge_current"]      = m.getChargeCurrent();
+            obj["charge_state"]        = m.getChargeState();
+            obj["error_code"]          = m.getErrorCode();
+            obj["load_state"]          = m.getLoadState();
+            obj["load_current"]        = m.getLoadCurrent();
+            obj["yield_today"]         = m.getYieldToday();
+            obj["yield_yesterday"]     = m.getYieldYesterday();
+            obj["yield_total"]         = m.getYieldTotal();
+            obj["max_power_today"]     = m.getMaxPowerToday();
+            obj["max_power_yesterday"] = m.getMaxPowerYesterday();
+            if (m.getProductID().length() > 0)    obj["product_id"]    = m.getProductID();
+            if (m.getSerialNumber().length() > 0) obj["serial_number"] = m.getSerialNumber();
+        };
 
-        data += tags + " ";
-        data += "pv_voltage=" + String(mppt1.getPanelVoltage(), 3) + ",";
-        data += "pv_power=" + String(mppt1.getPanelPower(), 1) + ",";
-        data += "battery_voltage=" + String(mppt1.getBatteryVoltage(), 3) + ",";
-        data += "charge_current=" + String(mppt1.getChargeCurrent(), 3) + ",";
-        data += "charge_state=\"" + mppt1.getChargeState() + "\",";
-        data += "error_code=" + String(mppt1.getErrorCode()) + ",";
-        data += "load_state=\"" + mppt1.getLoadState() + "\",";
-        data += "load_current=" + String(mppt1.getLoadCurrent(), 3) + ",";
-        data += "yield_today=" + String(mppt1.getYieldToday(), 3) + ",";
-        data += "yield_yesterday=" + String(mppt1.getYieldYesterday(), 3) + ",";
-        data += "yield_total=" + String(mppt1.getYieldTotal(), 3) + ",";
-        data += "max_power_today=" + String(mppt1.getMaxPowerToday()) + ",";
-        data += "max_power_yesterday=" + String(mppt1.getMaxPowerYesterday());
-        data += "\n";
+        if (mppt1.isDataValid()) fillMppt(doc.createNestedObject("mppt1"), mppt1);
+        if (mppt2.isDataValid()) fillMppt(doc.createNestedObject("mppt2"), mppt2);
+
+        if (publishJson(topicBase + "/solar", doc, false)) published++;
     }
 
-    // Solar data (MPPT2)
-    if (mppt2.isDataValid()) {
-        String deviceTag = String(deviceName);
-        deviceTag.replace(" ", "_");
-
-        // Add product_id and serial as tags if available
-        String tags = "solar,device=" + deviceTag + ",location=garage,mppt=2";
-        if (mppt2.getProductID().length() > 0) {
-            tags += ",product_id=" + mppt2.getProductID();
-        }
-        if (mppt2.getSerialNumber().length() > 0) {
-            String serial = mppt2.getSerialNumber();
-            serial.replace(" ", "_");
-            tags += ",serial=" + serial;
-        }
-
-        data += tags + " ";
-        data += "pv_voltage=" + String(mppt2.getPanelVoltage(), 3) + ",";
-        data += "pv_power=" + String(mppt2.getPanelPower(), 1) + ",";
-        data += "battery_voltage=" + String(mppt2.getBatteryVoltage(), 3) + ",";
-        data += "charge_current=" + String(mppt2.getChargeCurrent(), 3) + ",";
-        data += "charge_state=\"" + mppt2.getChargeState() + "\",";
-        data += "error_code=" + String(mppt2.getErrorCode()) + ",";
-        data += "load_state=\"" + mppt2.getLoadState() + "\",";
-        data += "load_current=" + String(mppt2.getLoadCurrent(), 3) + ",";
-        data += "yield_today=" + String(mppt2.getYieldToday(), 3) + ",";
-        data += "yield_yesterday=" + String(mppt2.getYieldYesterday(), 3) + ",";
-        data += "yield_total=" + String(mppt2.getYieldTotal(), 3) + ",";
-        data += "max_power_today=" + String(mppt2.getMaxPowerToday()) + ",";
-        data += "max_power_yesterday=" + String(mppt2.getMaxPowerYesterday());
-        data += "\n";
+    // Device status (retained so late subscribers see the latest state)
+    {
+        StaticJsonDocument<384> doc;
+        doc["device"]               = deviceName;
+        doc["chip_id"]              = chipId;
+        doc["timestamp"]            = millis() / 1000;
+        doc["uptime_seconds"]       = (millis() - bootTime) / 1000;
+        doc["wifi_connected"]       = (WiFi.status() == WL_CONNECTED);
+        doc["wifi_rssi"]            = WiFi.RSSI();
+        doc["free_heap"]            = ESP.getFreeHeap();
+        doc["smartshunt_valid"]     = smartShunt.isDataValid();
+        doc["mppt1_valid"]          = mppt1.isDataValid();
+        doc["mppt2_valid"]          = mppt2.isDataValid();
+        doc["mqtt_publish_failures"] = mqttPublishFailures;
+        if (publishJson(topicBase + "/status", doc, true)) published++;
     }
 
-    // System data
-    String deviceTag = String(deviceName);
-    deviceTag.replace(" ", "_");
-    
-    data += "system,device=" + deviceTag + ",location=garage ";
-    data += "uptime=" + String((millis() - bootTime) / 1000) + ",";
-    data += "wifi_rssi=" + String(WiFi.RSSI()) + ",";
-    data += "free_heap=" + String(ESP.getFreeHeap()) + ",";
-    data += "wifi_connected=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
-    data += "\n";
-
-    // Send the data
-    Serial.println("[InfluxDB] Sending data...");
-    int httpResponseCode = http.POST(data);
-
-    if (httpResponseCode > 0) {
-        Serial.printf("[InfluxDB] Data sent successfully, response: %d\n", httpResponseCode);
-        influxDBFailureCount = 0;  // Reset failure counter on success
-    } else {
-        Serial.printf("[InfluxDB] Failed to send data, error: %d\n", httpResponseCode);
-        Serial.println("[InfluxDB] Response: " + http.getString());
-        
-        influxDBFailureCount++;
-        // Log error every 10th failure to avoid spam
-        if (influxDBFailureCount % 10 == 1) {
-            String errorMsg = "POST failed: " + String(httpResponseCode < 0 ? "connection failed" : "HTTP " + String(httpResponseCode));
-            sendEventToInfluxDB("influxdb_error", errorMsg, "error");
-        }
-    }
-
-    http.end();
+    Serial.printf("[MQTT] Published %d topic(s)\n", published);
 }

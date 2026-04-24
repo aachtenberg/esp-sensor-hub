@@ -1,6 +1,6 @@
-# ESP32 Solar Monitor
+# ESP32-S3 Solar Monitor
 
-WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 microcontroller.
+WiFi-enabled monitoring system for Victron Energy solar equipment using the Freenove ESP32-S3-WROOM.
 
 **Status:** ✅ Implemented and deployed
 
@@ -10,9 +10,11 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 3. [Wiring Instructions](#wiring-instructions)
 4. [Pin Assignments](#pin-assignments)
 5. [VE.Direct Protocol](#vedirect-protocol)
-6. [API Endpoints](#api-endpoints)
-7. [Quick Reference](#quick-reference)
-8. [Troubleshooting](#troubleshooting)
+6. [MQTT Output and OTA Updates](#mqtt-output-and-ota-updates)
+7. [API Endpoints](#api-endpoints)
+8. [Quick Reference](#quick-reference)
+9. [Troubleshooting](#troubleshooting)
+10. [Integration with Backend](#integration-with-backend)
 
 ---
 
@@ -27,7 +29,8 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 - WiFi connectivity with WiFiManager (captive portal configuration)
 - JSON API for third-party integrations
 - Web dashboard
-- InfluxDB data logging integration
+- MQTT publishing to the `esp-sensor-hub/<device>/` namespace (consumed by Telegraf → TimescaleDB)
+- OTA firmware updates via ArduinoOTA (password-protected)
 
 ### Monitored Equipment
 
@@ -51,7 +54,7 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 
 | Component | Model | Notes |
 |-----------|-------|-------|
-| Microcontroller | ESP32-WROOM-32 | Dual UART + SoftwareSerial for 3 devices |
+| Microcontroller | Freenove ESP32-S3-WROOM | Dual UART + SoftwareSerial for 3 devices (`board = esp32-s3-devkitc-1`) |
 | Battery Monitor | Victron SmartShunt SHU050150050 | 500A/50mV shunt |
 | Charge Controller 1 | Victron SmartSolar MPPT SCC110050210 | 100V/50A |
 | Charge Controller 2 | Victron SmartSolar MPPT SCC110050210 | 100V/50A |
@@ -62,26 +65,28 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   ESP32-WROOM-32                        │
+│              Freenove ESP32-S3-WROOM                    │
 │                                                         │
 │  UART2 (SmartShunt):                                   │
 │    GPIO 16 (RX) ←─── SmartShunt TX                    │
 │                                                         │
 │  UART1 (MPPT1):                                        │
-│    GPIO 19 (RX) ←─── MPPT1 TX                         │
+│    GPIO 17 (RX) ←─── MPPT1 TX                         │
 │                                                         │
 │  SoftwareSerial (MPPT2):                               │
 │    GPIO 18 (RX) ←─── MPPT2 TX                         │
 │                                                         │
 │  I2C (OLED - optional):                                │
 │    GPIO 21 (SDA) ←──→ OLED SDA                        │
-│    GPIO 22 (SCL) ←──→ OLED SCL                        │
+│    GPIO  9 (SCL) ←──→ OLED SCL                        │
 │                                                         │
 │  Power:                                                 │
-│    VIN ←────────── 5V from 12V-to-5V converter         │
-│    3.3V ─────────→ VE.Direct VCC (all 3 devices)       │
-│    GND ──────────→ Common ground                        │
+│    5V  ←────────── 5V from 12V-to-5V converter         │
+│    GND ──────────→ Common ground (VE.Direct black x3)   │
 │                                                         │
+│  Reserved (do not use):                                │
+│    GPIO 19 / 20  → Native USB D-/D+                    │
+│    GPIO 22-25    → Do not exist on ESP32-S3            │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -93,45 +98,49 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using ESP32 mi
 
 VE.Direct uses a 4-pin connector with the following signals:
 
-| Pin | Signal | Color (typical) | Description |
-|-----|--------|-----------------|-------------|
-| 1 | GND | Black | Ground |
-| 2 | RX | - | Device receive (not used) |
-| 3 | TX | Yellow/White | Device transmit (to ESP32) |
-| 4 | VCC | Red | 3.3V power |
+| Pin | Signal | Wire color (nominal) | Description |
+|-----|--------|----------------------|-------------|
+| 1   | GND    | Black                | Ground (required) |
+| 2   | RX     | White ¹              | Host-to-device (unused for read-only monitoring) |
+| 3   | TX     | Yellow ¹             | Device-to-host — **this is the one you wire to the ESP32 RX pin** |
+| 4   | VCC    | Red                  | 3.3V supply (optional — the ESP32 has its own 3.3V rail) |
 
-**Important:** VE.Direct is 3.3V TTL - directly compatible with ESP32, no level shifter needed!
+¹ **Wire colors are not reliable.** Victron (and especially third-party) VE.Direct cables have been produced with yellow↔white swapped. If the nominal pinout gives no data, swap the two signal wires and try again — this deployment's SmartShunt cable uses **white for TX**, while the MPPT cables use yellow. Empirical test trumps the legend.
+
+**Important:** VE.Direct is 3.3V TTL — directly compatible with ESP32-S3, no level shifter needed.
 
 ### Step-by-Step Wiring
 
+> In each step below, "TX signal wire" is nominally **yellow**, but on some cables it's **white** — see the [cable-pinout caveat](#vedirect-cable-pinout) above. If `<device>_valid` in the `/status` MQTT topic stays `false` after wiring, swap the two non-black/non-red wires and retry.
+
 #### 1. Connect SmartShunt (UART2)
-- SmartShunt VE.Direct TX (yellow) → ESP32 GPIO 16
-- SmartShunt VE.Direct GND (black) → ESP32 GND
-- SmartShunt VE.Direct VCC (red) → ESP32 3.3V
+- SmartShunt VE.Direct TX signal → ESP32-S3 GPIO 16
+- SmartShunt VE.Direct GND (black) → ESP32-S3 GND (required)
+- SmartShunt VE.Direct VCC (red) → leave unconnected (ESP32-S3 has its own 3.3V)
 
 #### 2. Connect MPPT1 (UART1)
-- MPPT1 VE.Direct TX (yellow) → ESP32 GPIO 19
-- MPPT1 VE.Direct GND (black) → ESP32 GND
-- MPPT1 VE.Direct VCC (red) → ESP32 3.3V
+- MPPT1 VE.Direct TX signal → ESP32-S3 GPIO 17
+- MPPT1 VE.Direct GND (black) → ESP32-S3 GND (required)
+- MPPT1 VE.Direct VCC (red) → leave unconnected
 
 #### 3. Connect MPPT2 (SoftwareSerial)
-- MPPT2 VE.Direct TX (yellow) → ESP32 GPIO 18
-- MPPT2 VE.Direct GND (black) → ESP32 GND
-- MPPT2 VE.Direct VCC (red) → ESP32 3.3V
+- MPPT2 VE.Direct TX signal → ESP32-S3 GPIO 18
+- MPPT2 VE.Direct GND (black) → ESP32-S3 GND (required)
+- MPPT2 VE.Direct VCC (red) → leave unconnected
 
 #### 4. Connect OLED Display (Optional)
-- OLED SDA → ESP32 GPIO 21
-- OLED SCL → ESP32 GPIO 22
-- OLED VCC → ESP32 3.3V
-- OLED GND → ESP32 GND
+- OLED SDA → ESP32-S3 GPIO 21
+- OLED SCL → ESP32-S3 GPIO 9
+- OLED VCC → ESP32-S3 3.3V
+- OLED GND → ESP32-S3 GND
 
 **Note:** Set `OLED_ENABLED = false` in code if OLED hardware is not connected to prevent crashes.
 
-#### 5. Power the ESP32
+#### 5. Power the ESP32-S3
 - 12V battery positive → inline fuse (5A) → 12V-to-5V converter input (+)
 - 12V battery negative → 12V-to-5V converter input (-)
-- Converter 5V output → ESP32 VIN
-- Converter GND → ESP32 GND
+- Converter 5V output → ESP32-S3 5V pin
+- Converter GND → ESP32-S3 GND
 
 ### Verification Checklist
 
@@ -146,18 +155,21 @@ Before powering on:
 
 ## Pin Assignments
 
-### ESP32 GPIO Pin Configuration
+### ESP32-S3 GPIO Pin Configuration
 
 | GPIO Pin | Function | Connection | Protocol |
 |----------|----------|------------|----------|
 | GPIO 16 | SmartShunt RX | UART2 RX | VE.Direct 19200 baud |
-| GPIO 19 | MPPT1 RX | UART1 RX | VE.Direct 19200 baud |
+| GPIO 17 | MPPT1 RX | UART1 RX | VE.Direct 19200 baud |
 | GPIO 18 | MPPT2 RX | SoftwareSerial RX | VE.Direct 19200 baud |
 | GPIO 21 | OLED SDA | I2C Data | 100 kHz |
-| GPIO 22 | OLED SCL | I2C Clock | 100 kHz |
-| 3.3V | VE.Direct VCC | Power output | Powers all VE.Direct interfaces |
-| GND | Common ground | Ground | All devices |
-| VIN | 5V power input | From converter | ESP32 power |
+| GPIO 9  | OLED SCL | I2C Clock | 100 kHz (software/bit-banged, see note below) |
+| GND | Common ground | — | All Victron devices' black wires + OLED GND |
+| 5V | 5V power input | From converter | ESP32-S3 power |
+
+> **Reserved on ESP32-S3 — do not reuse:** GPIO 19/20 are wired to the native USB D-/D+ lines. GPIO 22–25 don't exist on ESP32-S3 at all, which is why the OLED SCL moved off GPIO 22 and MPPT1 moved off GPIO 19 compared to the original ESP32-WROOM-32 pinout.
+
+> **OLED uses U8g2's SW (bit-banged) I²C driver, not hardware I²C.** The `_HW_I2C` variant has a pathological slowdown on ESP32-S3 (30+ s blocking in `display.begin()`). Bit-banged I²C runs instantly and is perfectly adequate for a 128×64 SSD1306 refreshed once per second. See [src/display.cpp](../../solar-monitor/src/display.cpp).
 
 ---
 
@@ -256,9 +268,47 @@ Checksum        \xB4
 
 ---
 
+## MQTT Output and OTA Updates
+
+The firmware publishes sensor telemetry over MQTT (consumed by Telegraf → TimescaleDB) and accepts OTA firmware pushes. Both are configured in `solar-monitor/include/secrets.h`.
+
+### MQTT topics
+
+All topics use the prefix `esp-sensor-hub/<sanitized-device-name>/` (spaces in the device name become hyphens) so they share Telegraf's `esp-sensor-hub/+/+` subscription with the temperature-sensor fleet.
+
+| Topic | Retain | Cadence | Payload |
+|-------|--------|---------|---------|
+| `.../battery` | no | 30 s (when valid) | SmartShunt snapshot |
+| `.../solar`   | no | 30 s (when valid) | Both MPPTs in one document (nested `mppt1`/`mppt2` objects) |
+| `.../status`  | **yes** | 30 s | Device health + per-channel validity flags |
+| `.../events`  | no | on-event | Boot, WiFi lifecycle, sensor errors, OTA lifecycle |
+
+Full payload schemas and example documents live in [CONFIG.md](CONFIG.md#mqtt-topics).
+
+### OTA updates
+
+`platformio.ini` exposes two environments:
+
+- `env:esp32-s3-devkitc-1` — USB flash via the CH343 UART port (first flash only)
+- `env:ota` — ArduinoOTA over WiFi, inherits everything else, password via env var
+
+```bash
+# First time (USB)
+pio run -e esp32-s3-devkitc-1 -t upload
+
+# Subsequent updates (OTA)
+OTA_PASSWORD=<your-pw> pio run -e ota -t upload
+```
+
+The OTA password is never stored in `platformio.ini` — `upload_flags` reads it from the `OTA_PASSWORD` shell variable. The same password must be set in `secrets.h` (consumed by the firmware side).
+
+OTA lifecycle events (`ota_start`, `ota_complete`, `ota_error`) are published to `.../events`, which is a convenient remote audit trail.
+
+---
+
 ## API Endpoints
 
-The ESP32 runs a web server providing JSON API endpoints and an HTML dashboard.
+The ESP32-S3 runs a web server providing JSON API endpoints and an HTML dashboard.
 
 ### Endpoints
 
@@ -348,14 +398,14 @@ The ESP32 runs a web server providing JSON API endpoints and an HTML dashboard.
 ### Connection Summary
 
 ```
-ESP32 GPIO 16 (RX2) ←── SmartShunt TX
-ESP32 GPIO 19 (RX1) ←── MPPT1 TX
-ESP32 GPIO 18 (SW)  ←── MPPT2 TX
-ESP32 GPIO 21 (SDA) ←──→ OLED SDA (optional)
-ESP32 GPIO 22 (SCL) ←──→ OLED SCL (optional)
-ESP32 3.3V ──────────→ VE.Direct VCC (all 3)
-ESP32 GND ───────────→ Common ground
-ESP32 VIN ←────────── 5V from converter
+ESP32-S3 GPIO 16 (RX2) ←── SmartShunt TX
+ESP32-S3 GPIO 17 (RX1) ←── MPPT1 TX
+ESP32-S3 GPIO 18 (SW)  ←── MPPT2 TX
+ESP32-S3 GPIO 21 (SDA) ←──→ OLED SDA (optional)
+ESP32-S3 GPIO  9 (SCL) ←──→ OLED SCL (optional)
+ESP32-S3 3.3V ──────────→ VE.Direct VCC (all 3)
+ESP32-S3 GND ───────────→ Common ground
+ESP32-S3 5V  ←────────── 5V from converter
 ```
 
 ### VE.Direct Settings
@@ -367,11 +417,10 @@ ESP32 VIN ←────────── 5V from converter
 
 ### WiFi Configuration
 
-- **Initial Setup:** Connect to "Solar-Monitor-Setup" AP on first boot or after double-reset
+- **Initial Setup:** connect to the `SolarMonitor-Setup` AP on first boot (or after a double-reset)
 - **Portal:** WiFiManager captive portal at `http://192.168.4.1`
-- **Double Reset:** Reset device twice within 3 seconds to enter config mode
-  - Uses ESP_DoubleResetDetector library (RTC memory persistence)
-- **Configuration:** WiFi credentials, device name, InfluxDB settings
+- **Double Reset:** press the reset button twice within 3 seconds to re-enter config mode (ESP_DoubleResetDetector in RTC memory)
+- **Configurable:** WiFi credentials and device name (MQTT broker + OTA password live in `secrets.h`; the device name drives the MQTT topic base `esp-sensor-hub/<sanitized-name>/`)
 
 ### OLED Display Pages (if enabled)
 
@@ -386,42 +435,25 @@ The OLED cycles through multiple pages showing:
 
 ## Troubleshooting
 
-### No Data from SmartShunt
+### No Data from a VE.Direct Device
 
-**Symptoms:** SmartShunt data shows as invalid or zero
-**Checks:**
-- Verify GPIO 16 connection to SmartShunt TX
-- Check VE.Direct cable is plugged in firmly
-- Ensure VE.Direct is enabled in SmartShunt settings (via VictronConnect app)
-- Verify common ground connection
-- Check baud rate is 19200 in code
-- Monitor serial output for raw data stream
+**Symptoms:** the corresponding `smartshunt_valid` / `mppt1_valid` / `mppt2_valid` flag in the retained `.../status` MQTT topic stays `false`.
 
-### No Data from MPPT1
+**Checks (in order):**
+1. **Wrong signal wire** — yellow↔white are swapped on some cables (the SmartShunt in this deployment ships with white=TX). Swap the two non-GND wires and retry.
+2. **Wrong GPIO** — SmartShunt → 16, MPPT1 → 17, MPPT2 → 18. If you see `mppt2_valid: true` when you expected `mppt1_valid`, you're on the wrong pin.
+3. **Missing common ground** — the Victron device's black wire must share GND with the ESP32-S3. Without it, the signal is meaningless.
+4. **VE.Direct TX port function disabled** — in VictronConnect → *Settings → Ports → TX port function* must be `Normal communication` (per-device, not global).
+5. **Victron device not powered** — MPPTs derive their logic power from the battery terminals, not the solar side. With no battery voltage the VE.Direct port is silent. Confirm the device is reachable via VictronConnect's Bluetooth.
+6. Probe the TX wire with a scope or LED — expect ~1 Hz bursts at 3.3V TTL.
 
-**Symptoms:** MPPT1 data shows as invalid or zero
-**Checks:**
-- Verify GPIO 19 connection to MPPT1 TX
-- Check VE.Direct cable connection
-- Some MPPTs need VE.Direct enabled in settings
-- Verify common ground connection
-
-### No Data from MPPT2
-
-**Symptoms:** MPPT2 data shows as invalid or zero
-**Checks:**
-- Verify GPIO 18 connection to MPPT2 TX
-- Check VE.Direct cable connection
-- SoftwareSerial used for MPPT2 - ensure no pin conflicts
-- Verify common ground connection
-
-### ESP32 Not Powering On
+### ESP32-S3 Not Powering On
 
 **Symptoms:** No LED activity, no WiFi AP
 **Checks:**
 - Check fuse (should be intact)
 - Verify 12V-to-5V converter is working
-- Measure voltage at ESP32 VIN pin (should be ~5V)
+- Measure voltage at ESP32-S3 5V pin (should be ~5V)
 - Check converter input voltage (should be 12V from battery)
 
 ### Garbled/Corrupt Data
@@ -439,7 +471,7 @@ The OLED cycles through multiple pages showing:
 **Symptoms:** OLED remains blank or shows garbage
 **Checks:**
 - Set `OLED_ENABLED = false` if hardware not connected
-- Verify I2C connections (GPIO 21 = SDA, GPIO 22 = SCL)
+- Verify I2C connections (GPIO 21 = SDA, GPIO 9 = SCL)
 - Check OLED I2C address (usually 0x3C)
 - Verify OLED power (3.3V and GND)
 - Check serial output for I2C initialization errors
@@ -449,7 +481,7 @@ The OLED cycles through multiple pages showing:
 **Symptoms:** Cannot connect to WiFi, frequent disconnections
 **Checks:**
 - Double-reset within 3 seconds to enter WiFiManager portal
-- Portal AP: "Solar-Monitor-Setup" at `http://192.168.4.1`
+- Portal AP: `SolarMonitor-Setup` at `http://192.168.4.1`
 - Verify WiFi credentials are correct (case-sensitive)
 - Check WiFi signal strength (RSSI in system API)
 - Ensure 2.4GHz WiFi is enabled (ESP32 doesn't support 5GHz)
@@ -459,7 +491,7 @@ The OLED cycles through multiple pages showing:
 
 **Symptoms:** Cannot reach API endpoints or dashboard
 **Checks:**
-- Verify ESP32 is connected to WiFi (check serial output)
+- Verify ESP32-S3 is connected to WiFi (check serial output)
 - Confirm IP address (shown on OLED or in serial output)
 - Try accessing from same network/subnet
 - Check firewall settings
@@ -471,9 +503,13 @@ The OLED cycles through multiple pages showing:
 
 This solar monitor integrates with the same Raspberry Pi infrastructure as the temperature sensors:
 
-- **InfluxDB:** Time-series data storage
-- **Grafana:** Dashboard visualization
-- **Home Assistant:** Automation and alerts
+- **MQTT broker (Mosquitto):** message transport under `esp-sensor-hub/<device>/` topics
+- **Telegraf:** consumes MQTT topics and writes to TimescaleDB
+- **TimescaleDB:** time-series storage
+- **Grafana:** dashboard visualization
+- **Home Assistant:** automation and alerts
+
+See [CONFIG.md](CONFIG.md) for the full topic schema and payload examples.
 
 See the main [repository README](../../README.md) for backend setup details.
 

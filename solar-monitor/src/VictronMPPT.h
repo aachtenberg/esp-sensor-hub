@@ -6,7 +6,7 @@
  * Hardware: SmartSolar MPPT SCC110050210 (100V/50A)
  * Protocol: VE.Direct ASCII, 19200 baud, 8N1, 3.3V TTL
  *
- * Connection: ESP32 GPIO 19 (UART1 RX) <- MPPT TX
+ * Connection: ESP32-S3 GPIO 17 (UART1 RX) <- MPPT TX
  */
 
 #ifndef VICTRON_MPPT_H

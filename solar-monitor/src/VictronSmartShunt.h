@@ -6,7 +6,7 @@
  * Hardware: SmartShunt SHU050150050 (500A/50mV)
  * Protocol: VE.Direct ASCII, 19200 baud, 8N1, 3.3V TTL
  *
- * Connection: ESP32 GPIO 16 (UART2 RX) <- SmartShunt TX
+ * Connection: ESP32-S3 GPIO 16 (UART2 RX) <- SmartShunt TX
  */
 
 #ifndef VICTRON_SMARTSHUNT_H

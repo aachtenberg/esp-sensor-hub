@@ -9,8 +9,9 @@
 
 #if OLED_ENABLED
 
-// Display instance - SSD1306 128x64 I2C with hardware I2C
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, DISPLAY_SCL_PIN, DISPLAY_SDA_PIN);
+// Display instance - SSD1306 128x64 I2C (software/bit-banged — reliable on ESP32-S3)
+// SW_I2C constructor: (rotation, clock_pin, data_pin, reset_pin)
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, DISPLAY_SCL_PIN, DISPLAY_SDA_PIN, /* reset=*/ U8X8_PIN_NONE);
 
 // Page cycling
 DisplayPage currentPage = PAGE_BATTERY;
@@ -22,12 +23,8 @@ const unsigned long PAGE_CYCLE_INTERVAL = 5000;  // 5 seconds per page
 // ============================================================================
 
 void initDisplay() {
-    Serial.println("[OLED] Initializing display...");
-    
-    // Initialize I2C with custom pins
-    Wire.begin(DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
-    
-    // Initialize display
+    Serial.printf("[OLED] Initializing SW-I2C display (SDA=%d, SCL=%d)...\n",
+                  DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
     if (!display.begin()) {
         Serial.println("[OLED] ERROR: Display initialization failed!");
         return;
