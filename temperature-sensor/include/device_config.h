@@ -46,8 +46,8 @@ static const unsigned long WIFI_PERIODIC_RECONNECT_INTERVAL_MS = 86400000;  // F
 // Complete battery setup with TP4056 charger: see docs/hardware/BATTERY_SETUP_GUIDE.md
 // #define BATTERY_MONITOR_ENABLED
 
-// Only enable battery monitoring on ESP32
-#ifdef ESP32
+// Only enable battery monitoring on ESP32 (disable with -D NO_BATTERY_MONITOR flag)
+#if defined(ESP32) && !defined(NO_BATTERY_MONITOR)
   #define BATTERY_MONITOR_ENABLED
 #endif
 
