@@ -315,6 +315,9 @@ void setup() {
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
     mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
     mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
+    // Default PubSubClient keepalive is 15s — too tight when WiFi is briefly
+    // unresponsive (e.g. overnight with low traffic). Bump to 60s.
+    mqttClient.setKeepAlive(60);
 
     // Initialize VE.Direct serial ports (RX only, TX pin = -1)
     Serial.println("[UART] Initializing SmartShunt on GPIO 16...");
@@ -533,6 +536,11 @@ void setupWiFi() {
     wm.setConnectTimeout(0);
 
     WiFi.mode(WIFI_STA);
+    // Disable WiFi modem sleep — overnight low-traffic conditions otherwise
+    // cause MQTT keepalives to be missed, leading to repeated disconnects.
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
 
     // Check for double reset - enter config portal if detected
     if (drd->detectDoubleReset()) {
