@@ -118,6 +118,7 @@ String sanitizeDeviceName(const char* name);
 void updateTopicBase();
 bool ensureMqttConnected();
 bool publishJson(const String& topic, JsonDocument& doc, bool retain = false);
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 // ============================================================================
 // MQTT Configuration
@@ -125,6 +126,8 @@ bool publishJson(const String& topic, JsonDocument& doc, bool retain = false);
 
 #define MQTT_PUBLISH_INTERVAL_MS          30000   // Publish sensor data every 30s
 #define MQTT_RECONNECT_INTERVAL_MS        5000
+#define MQTT_RECONNECT_MAX_INTERVAL_MS    60000
+#define MQTT_UNSTABLE_WINDOW_MS           15000
 #define MQTT_STALE_CONNECTION_TIMEOUT_MS  120000  // Force reconnect if no successful publish in 2 min
 #define MQTT_SOCKET_TIMEOUT_SEC           5
 #define MQTT_BUFFER_SIZE                  1024    // Needs to hold largest payload (solar JSON)
@@ -138,6 +141,9 @@ String topicBase;       // "esp-sensor-hub/<sanitized-device>"
 unsigned long lastMqttPublish = 0;
 unsigned long lastMqttReconnectAttempt = 0;
 unsigned long lastSuccessfulMqttPublish = 0;
+unsigned long mqttConnectedAt = 0;
+unsigned long mqttReconnectBackoff = MQTT_RECONNECT_INTERVAL_MS;
+bool wasMqttConnected = false;
 int mqttPublishFailures = 0;
 
 // ============================================================================
@@ -206,14 +212,27 @@ void updateTopicBase() {
     topicBase = String("esp-sensor-hub/") + sanitizeDeviceName(deviceName);
 }
 
+String getTopicCommand() {
+    return topicBase + "/command";
+}
+
 bool ensureMqttConnected() {
     if (WiFi.status() != WL_CONNECTED) {
+        wasMqttConnected = false;
         return false;
     }
 
     // Stale-connection watchdog: if connected but no successful publish in 2 min, force reconnect
     if (mqttClient.connected()) {
         unsigned long now = millis();
+        if (!wasMqttConnected) {
+            wasMqttConnected = true;
+            mqttConnectedAt = now;
+        }
+        if (mqttReconnectBackoff != MQTT_RECONNECT_INTERVAL_MS &&
+            (now - mqttConnectedAt) > MQTT_UNSTABLE_WINDOW_MS) {
+            mqttReconnectBackoff = MQTT_RECONNECT_INTERVAL_MS;
+        }
         if (lastSuccessfulMqttPublish > 0 &&
             (now - lastSuccessfulMqttPublish) > MQTT_STALE_CONNECTION_TIMEOUT_MS) {
             Serial.println("[MQTT] Stale connection - forcing reconnect");
@@ -225,8 +244,18 @@ bool ensureMqttConnected() {
     }
 
     unsigned long now = millis();
+    if (wasMqttConnected) {
+        unsigned long connectionLifetime = now - mqttConnectedAt;
+        wasMqttConnected = false;
+        if (connectionLifetime < MQTT_UNSTABLE_WINDOW_MS) {
+            mqttReconnectBackoff = min(mqttReconnectBackoff * 2, (unsigned long)MQTT_RECONNECT_MAX_INTERVAL_MS);
+            Serial.printf("[MQTT] Unstable connection lasted %lums, backing off to %lus\n",
+                          connectionLifetime, mqttReconnectBackoff / 1000);
+        }
+    }
+
     if (lastMqttReconnectAttempt > 0 &&
-        (now - lastMqttReconnectAttempt) < MQTT_RECONNECT_INTERVAL_MS) {
+        (now - lastMqttReconnectAttempt) < mqttReconnectBackoff) {
         return false;
     }
     lastMqttReconnectAttempt = now;
@@ -243,9 +272,15 @@ bool ensureMqttConnected() {
 
     if (connected) {
         Serial.println("[MQTT] Connected");
+        wasMqttConnected = true;
+        mqttConnectedAt = now;
+        // (Re)subscribe to the command topic on every successful connect
+        mqttClient.subscribe(getTopicCommand().c_str());
+        Serial.printf("[MQTT] Subscribed to command topic: %s\n", getTopicCommand().c_str());
     } else {
+        mqttReconnectBackoff = min(mqttReconnectBackoff * 2, (unsigned long)MQTT_RECONNECT_MAX_INTERVAL_MS);
         Serial.printf("[MQTT] Connect failed, state=%d, retry in %lus\n",
-                      mqttClient.state(), MQTT_RECONNECT_INTERVAL_MS / 1000);
+                      mqttClient.state(), mqttReconnectBackoff / 1000);
         mqttPublishFailures++;
     }
     return connected;
@@ -286,6 +321,35 @@ void publishEvent(const String& eventType, const String& message, const String& 
 }
 
 // ============================================================================
+// MQTT Command Handling
+// ============================================================================
+
+// Handles inbound messages on <topicBase>/command. Mirrors the restart command
+// implemented in the temperature-sensor and bme280-sensor firmware.
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    // Use a fixed buffer instead of String to avoid heap fragmentation
+    char payloadStr[128];
+    unsigned int copyLen = min(length, (unsigned int)(sizeof(payloadStr) - 1));
+    memcpy(payloadStr, payload, copyLen);
+    payloadStr[copyLen] = '\0';
+
+    Serial.printf("[MQTT] Received command: %s = %s\n", topic, payloadStr);
+
+    // Exact topic match to avoid acting on unintended topics
+    if (strcmp(topic, getTopicCommand().c_str()) != 0) {
+        return;
+    }
+
+    if (strcmp(payloadStr, "restart") == 0) {
+        publishEvent("device_restart", "Restarting device via MQTT command", "warning");
+        delay(500);  // give the event publish time to flush before reboot
+        ESP.restart();
+    } else {
+        publishEvent("command_error", String("Unknown command: ") + payloadStr, "error");
+    }
+}
+
+// ============================================================================
 // Setup
 // ============================================================================
 
@@ -313,6 +377,7 @@ void setup() {
 
     // Configure MQTT client
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(mqttCallback);
     mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
     mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
     // Default PubSubClient keepalive is 15s — too tight when WiFi is briefly
