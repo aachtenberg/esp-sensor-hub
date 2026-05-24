@@ -672,6 +672,8 @@ void publishStatus() {
   doc["uptime_seconds"] = (millis() - metrics.bootTime) / 1000;
   doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
   doc["wifi_rssi"] = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
+  doc["ip_address"] = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
+  doc["wifi_ssid"] = (WiFi.status() == WL_CONNECTED) ? WiFi.SSID() : String("");
   doc["free_heap"] = ESP.getFreeHeap();
   doc["sensor_healthy"] = isValidTemperature(temperatureC);
   doc["wifi_reconnects"] = metrics.wifiReconnects;
