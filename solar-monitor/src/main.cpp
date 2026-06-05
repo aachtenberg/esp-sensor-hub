@@ -119,6 +119,8 @@ void updateTopicBase();
 bool ensureMqttConnected();
 bool publishJson(const String& topic, JsonDocument& doc, bool retain = false);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
+bool isWifiReconnectRateLimited();
+void forceWifiReconnect(const String& reason);
 
 // ============================================================================
 // MQTT Configuration
@@ -131,6 +133,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 #define MQTT_STALE_CONNECTION_TIMEOUT_MS  120000  // Force reconnect if no successful publish in 2 min
 #define MQTT_SOCKET_TIMEOUT_SEC           5
 #define MQTT_BUFFER_SIZE                  1024    // Needs to hold largest payload (solar JSON)
+
+// ----------------------------------------------------------------------------
+// WiFi self-healing
+// ----------------------------------------------------------------------------
+// WiFi.status() can report WL_CONNECTED while the associated AP/mesh node has
+// lost its backhaul (or the link is half-open), so MQTT can never reach the
+// broker and reconnect loops forever. WiFi.setAutoReconnect() does NOT recover
+// from this — it only fires when the STA actually drops. When MQTT keeps
+// failing despite "connected" WiFi, force a re-association so the radio scans
+// and picks a healthy BSSID. (Previously this required a physical reset.)
+#define WIFI_CONSECUTIVE_MQTT_FAILURE_THRESHOLD  5         // Force re-assoc after 5 consecutive MQTT failures
+#define WIFI_FORCED_RECONNECT_COOLDOWN_MS        300000UL  // Min 5 min between forced reconnects
+#define WIFI_MAX_RECONNECTS_PER_HOUR             6         // Emergency brake to prevent thrashing
+#define WIFI_RECONNECT_HISTORY_WINDOW_MS         3600000UL // 1 hour rolling window
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -145,6 +161,13 @@ unsigned long mqttConnectedAt = 0;
 unsigned long mqttReconnectBackoff = MQTT_RECONNECT_INTERVAL_MS;
 bool wasMqttConnected = false;
 int mqttPublishFailures = 0;
+
+// WiFi self-healing state
+int consecutiveMqttFailures = 0;                  // Reset on any MQTT success
+unsigned long lastForcedWifiReconnect = 0;        // Timestamp of last forced re-association
+unsigned long wifiReconnectTimestamps[WIFI_MAX_RECONNECTS_PER_HOUR] = {0};  // Rolling window
+int wifiReconnectIndex = 0;                       // Circular buffer index
+unsigned int totalForcedWifiReconnects = 0;       // Lifetime count (diagnostics)
 
 // ============================================================================
 // Device Name Management
@@ -274,6 +297,7 @@ bool ensureMqttConnected() {
         Serial.println("[MQTT] Connected");
         wasMqttConnected = true;
         mqttConnectedAt = now;
+        consecutiveMqttFailures = 0;  // Healthy link — clear the self-heal counter
         // (Re)subscribe to the command topic on every successful connect
         mqttClient.subscribe(getTopicCommand().c_str());
         Serial.printf("[MQTT] Subscribed to command topic: %s\n", getTopicCommand().c_str());
@@ -282,6 +306,7 @@ bool ensureMqttConnected() {
         Serial.printf("[MQTT] Connect failed, state=%d, retry in %lus\n",
                       mqttClient.state(), mqttReconnectBackoff / 1000);
         mqttPublishFailures++;
+        consecutiveMqttFailures++;  // May trigger a forced WiFi re-association in loop()
     }
     return connected;
 }
@@ -295,8 +320,10 @@ bool publishJson(const String& topic, JsonDocument& doc, bool retain) {
     bool ok = mqttClient.publish(topic.c_str(), payload.c_str(), retain);
     if (ok) {
         lastSuccessfulMqttPublish = millis();
+        consecutiveMqttFailures = 0;  // Data is reaching the broker — link is healthy
     } else {
         mqttPublishFailures++;
+        consecutiveMqttFailures++;  // May trigger a forced WiFi re-association in loop()
         Serial.printf("[MQTT] Publish failed on %s (len=%d)\n", topic.c_str(), payload.length());
     }
     return ok;
@@ -318,6 +345,67 @@ void publishEvent(const String& eventType, const String& message, const String& 
     if (ok) {
         Serial.println("[Event] " + eventType + " - " + message);
     }
+}
+
+// ============================================================================
+// WiFi Self-Healing
+// ============================================================================
+
+// Returns true if we've forced a reconnect too recently / too often and should
+// hold off, to avoid thrashing the radio when WiFi is genuinely flaky.
+bool isWifiReconnectRateLimited() {
+    unsigned long now = millis();
+
+    // Cooldown: minimum gap between forced reconnects
+    if (lastForcedWifiReconnect > 0 &&
+        (now - lastForcedWifiReconnect) < WIFI_FORCED_RECONNECT_COOLDOWN_MS) {
+        return true;
+    }
+
+    // Emergency brake: cap forced reconnects per rolling hour
+    int reconnectsInWindow = 0;
+    for (int i = 0; i < WIFI_MAX_RECONNECTS_PER_HOUR; i++) {
+        if (wifiReconnectTimestamps[i] > 0 &&
+            (now - wifiReconnectTimestamps[i]) < WIFI_RECONNECT_HISTORY_WINDOW_MS) {
+            reconnectsInWindow++;
+        }
+    }
+    if (reconnectsInWindow >= WIFI_MAX_RECONNECTS_PER_HOUR) {
+        Serial.printf("[WiFi] EMERGENCY BRAKE: %d forced reconnects this hour, throttling\n",
+                      reconnectsInWindow);
+        return true;
+    }
+
+    return false;
+}
+
+// Force a fresh WiFi association. Unlike setAutoReconnect (which only fires when
+// the STA actually drops), this disconnects and reconnects so the radio rescans
+// and can land on a healthy BSSID — recovering "WiFi up but no backhaul" hangs
+// that previously needed a physical reset.
+void forceWifiReconnect(const String& reason) {
+    unsigned long now = millis();
+
+    Serial.printf("[WiFi] Forcing re-association: %s\n", reason.c_str());
+    // Best-effort notify before we tear the link down (likely won't make it out,
+    // but will publish on the next healthy connection if it doesn't).
+    publishEvent("wifi_forced_reconnect", "Reason: " + reason, "warning");
+
+    // Record in the rolling window for the emergency brake
+    wifiReconnectTimestamps[wifiReconnectIndex] = now;
+    wifiReconnectIndex = (wifiReconnectIndex + 1) % WIFI_MAX_RECONNECTS_PER_HOUR;
+    lastForcedWifiReconnect = now;
+    totalForcedWifiReconnects++;
+
+    // Drop MQTT first so we don't sit on a dead socket across the re-assoc
+    mqttClient.disconnect();
+    wasMqttConnected = false;
+
+    // Clean disconnect/reconnect to force a fresh BSSID selection
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.reconnect();
 }
 
 // ============================================================================
@@ -461,6 +549,9 @@ void loop() {
     if (!isConnected && wasConnected) {
         // WiFi disconnected
         reconnectCount++;
+        // While WiFi is actually down, MQTT failures aren't a backhaul signal —
+        // clear the counter so we don't force a re-assoc the instant WiFi returns.
+        consecutiveMqttFailures = 0;
         // Log every 5th reconnect attempt to avoid spam
         if (reconnectCount % 5 == 1) {
             String msg = "WiFi disconnected, reconnect attempt #" + String(reconnectCount);
@@ -469,6 +560,15 @@ void loop() {
     } else if (isConnected && !wasConnected) {
         // WiFi reconnected
         reconnectCount = 0;
+    } else if (isConnected) {
+        // WiFi reports connected and steady. If MQTT keeps failing anyway, the
+        // association has likely gone stale (AP/mesh node lost backhaul) — force
+        // a re-association so the radio can land on a healthy BSSID.
+        if (consecutiveMqttFailures >= WIFI_CONSECUTIVE_MQTT_FAILURE_THRESHOLD &&
+            !isWifiReconnectRateLimited()) {
+            forceWifiReconnect("MQTT failures: " + String(consecutiveMqttFailures));
+            consecutiveMqttFailures = 0;  // Give the new link a clean slate
+        }
     }
     wasConnected = isConnected;
 
@@ -1189,6 +1289,7 @@ void publishDataToMqtt() {
         doc["mppt1_valid"]          = mppt1.isDataValid();
         doc["mppt2_valid"]          = mppt2.isDataValid();
         doc["mqtt_publish_failures"] = mqttPublishFailures;
+        doc["wifi_forced_reconnects"] = totalForcedWifiReconnects;
         if (publishJson(topicBase + "/status", doc, true)) published++;
     }
 
