@@ -29,6 +29,7 @@
 #include <WiFiManager.h>
 #include <ESP_DoubleResetDetector.h>
 #include <ArduinoOTA.h>
+#include <esp_task_wdt.h>
 
 // Filesystem for device name storage
 #ifdef ESP32
@@ -121,6 +122,7 @@ bool publishJson(const String& topic, JsonDocument& doc, bool retain = false);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 bool isWifiReconnectRateLimited();
 void forceWifiReconnect(const String& reason);
+void setupTaskWatchdog();
 
 // ============================================================================
 // MQTT Configuration
@@ -133,6 +135,22 @@ void forceWifiReconnect(const String& reason);
 #define MQTT_STALE_CONNECTION_TIMEOUT_MS  120000  // Force reconnect if no successful publish in 2 min
 #define MQTT_SOCKET_TIMEOUT_SEC           5
 #define MQTT_BUFFER_SIZE                  1024    // Needs to hold largest payload (solar JSON)
+
+// Last-resort self-heal. The stale-connection watchdog (re-MQTT) and WiFi
+// self-healing (re-association) both run first; if MQTT STILL can't deliver a
+// single payload this long after the last success, the WiFi/TCP stack has
+// wedged in a way re-association can't clear, so reboot. Turns the observed
+// multi-hour blackouts (which previously needed a manual power-cycle) into a
+// ~30s recovery. Only armed after the first successful publish since boot, so
+// an intentionally-offline device never reboot-loops.
+#define MQTT_DEAD_REBOOT_TIMEOUT_MS       900000UL  // 15 min with zero successful publishes -> restart
+
+// Task watchdog. Catches the other failure mode: loop() blocked entirely (a
+// hard deadlock in the WiFi/serial stack). esp_task_wdt_reset() is fed every
+// loop iteration; if a single iteration ever stalls past this, the chip
+// reboots. The Arduino loop task is NOT watched by default. Unsubscribed during
+// OTA (a flash legitimately blocks loop() for longer than this).
+#define TASK_WDT_TIMEOUT_SEC              30
 
 // ----------------------------------------------------------------------------
 // WiFi self-healing
@@ -379,6 +397,27 @@ bool isWifiReconnectRateLimited() {
     return false;
 }
 
+// Subscribe the Arduino loop task to the hardware task watchdog. A reset must
+// be fed every loop iteration (see loop()); if loop() ever blocks longer than
+// TASK_WDT_TIMEOUT_SEC the chip reboots with reset reason "Task Watchdog".
+void setupTaskWatchdog() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+    // Arduino-ESP32 3.x / IDF 5.x: struct-based init. idle_core_mask = 0 leaves
+    // the idle tasks alone; we only watch our own loop task.
+    esp_task_wdt_config_t wdtConfig = {
+        .timeout_ms = TASK_WDT_TIMEOUT_SEC * 1000,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    esp_task_wdt_init(&wdtConfig);  // harmless if already initialized
+#else
+    // Arduino-ESP32 2.x / IDF 4.x: (timeout_seconds, panic-on-timeout)
+    esp_task_wdt_init(TASK_WDT_TIMEOUT_SEC, true);
+#endif
+    esp_task_wdt_add(NULL);  // NULL = current (loop) task
+    Serial.printf("[Watchdog] Task watchdog armed (%ds)\n", TASK_WDT_TIMEOUT_SEC);
+}
+
 // Force a fresh WiFi association. Unlike setAutoReconnect (which only fires when
 // the STA actually drops), this disconnects and reconnects so the radio rescans
 // and can land on a healthy BSSID — recovering "WiFi up but no backhaul" hangs
@@ -523,6 +562,10 @@ void setup() {
                      ", Free heap: " + String(ESP.getFreeHeap()) + " bytes";
     publishEvent("device_boot", bootMsg, "info");
 
+    // Arm the task watchdog now that setup (incl. any blocking WiFi config
+    // portal) is done — from here loop() must keep iterating or the chip reboots.
+    setupTaskWatchdog();
+
     Serial.println();
     Serial.println("========================================");
     Serial.println("     Setup Complete");
@@ -535,6 +578,10 @@ void setup() {
 // ============================================================================
 
 void loop() {
+    // Feed the task watchdog — proves loop() is still iterating. A real deadlock
+    // stops reaching this and the chip reboots after TASK_WDT_TIMEOUT_SEC.
+    esp_task_wdt_reset();
+
     // Must call drd->loop() to keep double reset detection working
     drd->loop();
 
@@ -571,6 +618,21 @@ void loop() {
         }
     }
     wasConnected = isConnected;
+
+    // Last-resort self-heal: re-association (above) didn't restore MQTT delivery.
+    // If we've gone MQTT_DEAD_REBOOT_TIMEOUT_MS with no successful publish despite
+    // having published successfully at least once this boot, reboot to clear a
+    // wedged WiFi/TCP stack. Recovers in ~30s instead of staying dark for hours.
+    if (lastSuccessfulMqttPublish > 0 &&
+        (millis() - lastSuccessfulMqttPublish) > MQTT_DEAD_REBOOT_TIMEOUT_MS) {
+        Serial.printf("[Watchdog] No successful MQTT publish in %lu min — restarting\n",
+                      MQTT_DEAD_REBOOT_TIMEOUT_MS / 60000UL);
+        publishEvent("mqtt_dead_reboot",
+                     "No successful publish in " + String(MQTT_DEAD_REBOOT_TIMEOUT_MS / 60000UL) +
+                     " min — rebooting to self-heal", "error");
+        delay(200);  // best-effort flush (will usually fail, since MQTT is dead)
+        ESP.restart();
+    }
 
     // Update device data (non-blocking) and log errors
     static unsigned long lastSmartShuntData = 0;
@@ -814,6 +876,9 @@ void setupOTA() {
         String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
         Serial.println("[OTA] Update started: " + type);
         publishEvent("ota_start", "OTA update starting (" + type + ")", "warning");
+        // Flashing blocks loop() far longer than the task watchdog window —
+        // unsubscribe so the WDT can't reboot us mid-update.
+        esp_task_wdt_delete(NULL);
     });
 
     ArduinoOTA.onEnd([]() {
@@ -841,6 +906,9 @@ void setupOTA() {
         else                                 errorMsg = "Unknown";
         Serial.printf("[OTA] Error[%u]: %s\n", error, errorMsg.c_str());
         publishEvent("ota_error", "OTA update failed: " + errorMsg, "error");
+        // Failed update means we keep running — re-arm the watchdog we dropped
+        // in onStart. (A successful update ends in a reboot, so no re-add there.)
+        esp_task_wdt_add(NULL);
     });
 
     ArduinoOTA.begin();
