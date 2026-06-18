@@ -31,8 +31,9 @@ WiFi credentials are not in secrets.h — they're managed at runtime via WiFiMan
 ### Initial USB Flash
 ```bash
 cd solar-monitor
-pio run -e esp32-s3-devkitc-1 -t upload --upload-port /dev/ttyACM0
+pio run -e esp32-s3-devkitc-1 -t upload --upload-port /dev/ttyUSB0
 ```
+> Flashing uses the CH343 UART port (typically `/dev/ttyUSB0`); the native USB-Serial/JTAG port (`/dev/ttyACM*`) carries the runtime serial monitor. The ROM bootloader always uses UART0, so CH343 flashing works regardless of the `ARDUINO_USB_CDC_ON_BOOT=1` console setting.
 
 ### OTA Updates
 After the first USB flash, subsequent updates can happen over WiFi. The `[env:ota]` environment inherits the base env and swaps `upload_protocol`.
@@ -42,7 +43,7 @@ cd solar-monitor
 OTA_PASSWORD=<your-ota-password> pio run -e ota -t upload
 ```
 
-`upload_port` defaults to `192.168.0.93` in `platformio.ini` — override with `--upload-port <ip-or-hostname>` if the device moves.
+`upload_port` defaults to `192.168.0.85` in `platformio.ini` — override with `--upload-port <ip-or-hostname>` if the device moves. `upload_flags` also pins `--host_port=8266` so the espota reverse connection isn't blocked by Windows Firewall under WSL2 mirrored networking.
 
 ## Hardware Connections
 
@@ -50,7 +51,7 @@ OTA_PASSWORD=<your-ota-password> pio run -e ota -t upload
 Connect Victron equipment to the ESP32-S3 via VE.Direct cables (RX-only, 19200 baud, 3.3V TTL):
 - SmartShunt TX → GPIO 16 (UART2 RX)
 - MPPT Controller 1 TX → GPIO 17 (UART1 RX)
-- MPPT Controller 2 TX → GPIO 18 (SoftwareSerial RX)
+- MPPT Controller 2 TX → GPIO 18 (UART0 RX; console moved to native USB to free UART0)
 
 ### OLED Display (Optional)
 - SDA → GPIO 21
@@ -125,7 +126,8 @@ Publish cadence: battery/solar/status every 30 s. Events are published as they o
   "smartshunt_valid": true,
   "mppt1_valid": true,
   "mppt2_valid": true,
-  "mqtt_publish_failures": 0
+  "mqtt_publish_failures": 0,
+  "wifi_forced_reconnects": 0
 }
 ```
 
@@ -143,7 +145,7 @@ Publish cadence: battery/solar/status every 30 s. Events are published as they o
 }
 ```
 
-Event types emitted: `device_boot`, `device_configured`, `wifi_connected`, `wifi_reconnect`, `sensor_error`, `ota_start`, `ota_complete`, `ota_error`.
+Event types emitted: `device_boot`, `device_configured`, `wifi_connected`, `wifi_reconnect`, `wifi_forced_reconnect`, `sensor_error`, `ota_start`, `ota_complete`, `ota_error`, `device_restart`, `mqtt_dead_reboot`, `command_error`.
 
 ## Runtime Configuration
 
@@ -183,8 +185,8 @@ mosquitto_sub -h 192.168.0.167 -t 'esp-sensor-hub/+/status' -v -W 2
 ### MQTT Not Publishing
 - Check serial log: `[MQTT] Connecting to <broker>:1883 ...` → `[MQTT] Connected`
 - If `Connect failed, state=N`, decode state: `-4` timeout, `-3` connection lost, `-2` connect failed, `5` bad credentials
-- Stale-connection watchdog forces reconnect after 120 s without a successful publish
-- `mqtt_publish_failures` in `status` payload is a good health metric
+- `mqtt_publish_failures` and `wifi_forced_reconnects` in the `status` payload are good health metrics
+- Layered self-healing (see [README → WiFi / MQTT Self-Healing](README.md#wifi--mqtt-self-healing)): stale-connection re-MQTT at 120 s → forced WiFi re-association after 5 consecutive failures → full reboot after 15 min with no successful publish → task-watchdog reboot on a `loop()` deadlock
 
 ### OTA Failures
 - `ota_error` event payload includes `Auth Failed`, `Begin Failed`, etc.
