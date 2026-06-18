@@ -31,6 +31,7 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using the Free
 - Web dashboard
 - MQTT publishing to the `esp-sensor-hub/<device>/` namespace (consumed by Telegraf → TimescaleDB)
 - OTA firmware updates via ArduinoOTA (password-protected)
+- WiFi/MQTT self-healing with watchdog reboots (see [WiFi / MQTT Self-Healing](#wifi--mqtt-self-healing))
 
 ### Monitored Equipment
 
@@ -54,7 +55,7 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using the Free
 
 | Component | Model | Notes |
 |-----------|-------|-------|
-| Microcontroller | Freenove ESP32-S3-WROOM | Dual UART + SoftwareSerial for 3 devices (`board = esp32-s3-devkitc-1`) |
+| Microcontroller | Freenove ESP32-S3-WROOM | Three hardware UARTs for 3 devices; console on native USB-Serial/JTAG (`board = esp32-s3-devkitc-1`) |
 | Battery Monitor | Victron SmartShunt SHU050150050 | 500A/50mV shunt |
 | Charge Controller 1 | Victron SmartSolar MPPT SCC110050210 | 100V/50A |
 | Charge Controller 2 | Victron SmartSolar MPPT SCC110050210 | 100V/50A |
@@ -73,7 +74,7 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using the Free
 │  UART1 (MPPT1):                                        │
 │    GPIO 17 (RX) ←─── MPPT1 TX                         │
 │                                                         │
-│  SoftwareSerial (MPPT2):                               │
+│  UART0 (MPPT2):                                        │
 │    GPIO 18 (RX) ←─── MPPT2 TX                         │
 │                                                         │
 │  I2C (OLED - optional):                                │
@@ -84,9 +85,10 @@ WiFi-enabled monitoring system for Victron Energy solar equipment using the Free
 │    5V  ←────────── 5V from 12V-to-5V converter         │
 │    GND ──────────→ Common ground (VE.Direct black x3)   │
 │                                                         │
-│  Reserved (do not use):                                │
-│    GPIO 19 / 20  → Native USB D-/D+                    │
-│    GPIO 22-25    → Do not exist on ESP32-S3            │
+│  Console / native USB (USB-Serial/JTAG):               │
+│    GPIO 19 / 20  → USB D-/D+  (serial monitor port)   │
+│  Do not exist on ESP32-S3:                             │
+│    GPIO 22-25                                          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -123,7 +125,7 @@ VE.Direct uses a 4-pin connector with the following signals:
 - MPPT1 VE.Direct GND (black) → ESP32-S3 GND (required)
 - MPPT1 VE.Direct VCC (red) → leave unconnected
 
-#### 3. Connect MPPT2 (SoftwareSerial)
+#### 3. Connect MPPT2 (UART0)
 - MPPT2 VE.Direct TX signal → ESP32-S3 GPIO 18
 - MPPT2 VE.Direct GND (black) → ESP32-S3 GND (required)
 - MPPT2 VE.Direct VCC (red) → leave unconnected
@@ -161,13 +163,13 @@ Before powering on:
 |----------|----------|------------|----------|
 | GPIO 16 | SmartShunt RX | UART2 RX | VE.Direct 19200 baud |
 | GPIO 17 | MPPT1 RX | UART1 RX | VE.Direct 19200 baud |
-| GPIO 18 | MPPT2 RX | SoftwareSerial RX | VE.Direct 19200 baud |
+| GPIO 18 | MPPT2 RX | UART0 RX (remapped via GPIO matrix) | VE.Direct 19200 baud |
 | GPIO 21 | OLED SDA | I2C Data | 100 kHz |
 | GPIO 9  | OLED SCL | I2C Clock | 100 kHz (software/bit-banged, see note below) |
 | GND | Common ground | — | All Victron devices' black wires + OLED GND |
 | 5V | 5V power input | From converter | ESP32-S3 power |
 
-> **Reserved on ESP32-S3 — do not reuse:** GPIO 19/20 are wired to the native USB D-/D+ lines. GPIO 22–25 don't exist on ESP32-S3 at all, which is why the OLED SCL moved off GPIO 22 and MPPT1 moved off GPIO 19 compared to the original ESP32-WROOM-32 pinout.
+> **GPIO 19/20 on ESP32-S3** carry the native USB-Serial/JTAG D-/D+ lines, used here for the runtime serial console (`ARDUINO_USB_CDC_ON_BOOT=1`). That frees UART0 for MPPT2 — its default pins (GPIO 43/44) are left to the CH343 UART, and the RX is remapped to GPIO 18 through the GPIO matrix. GPIO 22–25 don't exist on ESP32-S3 at all, which is why the OLED SCL moved off GPIO 22 compared to the original ESP32-WROOM-32 pinout.
 
 > **OLED uses U8g2's SW (bit-banged) I²C driver, not hardware I²C.** The `_HW_I2C` variant has a pathological slowdown on ESP32-S3 (30+ s blocking in `display.begin()`). Bit-banged I²C runs instantly and is perfectly adequate for a 128×64 SSD1306 refreshed once per second. See [src/display.cpp](../../solar-monitor/src/display.cpp).
 
@@ -289,20 +291,38 @@ Full payload schemas and example documents live in [CONFIG.md](CONFIG.md#mqtt-to
 
 `platformio.ini` exposes two environments:
 
-- `env:esp32-s3-devkitc-1` — USB flash via the CH343 UART port (first flash only)
-- `env:ota` — ArduinoOTA over WiFi, inherits everything else, password via env var
+- `env:esp32-s3-devkitc-1` — USB flash via the CH343 UART port (first flash only). The runtime serial monitor is on the **native USB-Serial/JTAG port** (`/dev/ttyACM*`), since the console moved there to free UART0 for MPPT2.
+- `env:ota` — ArduinoOTA over WiFi, inherits everything else, password via the `OTA_PASSWORD` env var. The device IP is **not** pinned in-repo (matches the sibling firmwares) — pass it at upload time as `--upload-port "$SOLAR_MONITOR_IP"` from `.env`. `upload_flags` keeps `--host_port=8266` (a host-environment WSL2 firewall setting, not a device address) so the espota reverse connection survives WSL2 mirrored-network firewalling.
 
 ```bash
 # First time (USB)
 pio run -e esp32-s3-devkitc-1 -t upload
 
-# Subsequent updates (OTA)
-OTA_PASSWORD=<your-pw> pio run -e ota -t upload
+# Subsequent updates (OTA) — IP from .env, not pinned in-repo
+source ../../.env
+pio run -e ota -t upload --upload-port "$SOLAR_MONITOR_IP"
 ```
 
 The OTA password is never stored in `platformio.ini` — `upload_flags` reads it from the `OTA_PASSWORD` shell variable. The same password must be set in `secrets.h` (consumed by the firmware side).
 
 OTA lifecycle events (`ota_start`, `ota_complete`, `ota_error`) are published to `.../events`, which is a convenient remote audit trail.
+
+---
+
+## WiFi / MQTT Self-Healing
+
+This device sits on weak/mesh WiFi and historically wedged with `WiFi.status() == WL_CONNECTED` but no path to the broker, going dark for hours until a manual power-cycle. The firmware now layers four mechanisms, cheapest first:
+
+| Layer | Trigger | Action | Tunable |
+|-------|---------|--------|---------|
+| Stale-connection watchdog | Connected but no successful publish in 120 s | Drop and re-establish the MQTT session | `MQTT_STALE_CONNECTION_TIMEOUT_MS` |
+| Forced WiFi re-association | 5 consecutive MQTT failures while WiFi reports connected | `WiFi.disconnect()` → `reconnect()` so the radio rescans for a healthy BSSID | `WIFI_CONSECUTIVE_MQTT_FAILURE_THRESHOLD` |
+| MQTT-dead reboot | No successful publish for 15 min (only after ≥1 publish this boot) | `ESP.restart()` to clear a wedged WiFi/TCP stack | `MQTT_DEAD_REBOOT_TIMEOUT_MS` |
+| Task watchdog | A single `loop()` iteration stalls > 30 s | Hardware reboot (reset reason "Task Watchdog"); unsubscribed during OTA | `TASK_WDT_TIMEOUT_SEC` |
+
+Guard rails on the forced re-association prevent radio thrashing: a 5-minute cooldown (`WIFI_FORCED_RECONNECT_COOLDOWN_MS`) and a max of 6 per rolling hour (`WIFI_MAX_RECONNECTS_PER_HOUR`). Diagnostics surface in the retained `.../status` payload (`mqtt_publish_failures`, `wifi_forced_reconnects`) and as `wifi_forced_reconnect` / `mqtt_dead_reboot` entries on `.../events`.
+
+**Root cause, not just recovery:** MPPT2 was moved off bit-banged EspSoftwareSerial onto hardware UART0. The software-serial RX ran in a GPIO interrupt at 19200 baud that contended with the WiFi stack — the prime suspect for the original wedges. All three VE.Direct inputs now use hardware UARTs.
 
 ---
 
@@ -400,7 +420,7 @@ The ESP32-S3 runs a web server providing JSON API endpoints and an HTML dashboar
 ```
 ESP32-S3 GPIO 16 (RX2) ←── SmartShunt TX
 ESP32-S3 GPIO 17 (RX1) ←── MPPT1 TX
-ESP32-S3 GPIO 18 (SW)  ←── MPPT2 TX
+ESP32-S3 GPIO 18 (RX0) ←── MPPT2 TX
 ESP32-S3 GPIO 21 (SDA) ←──→ OLED SDA (optional)
 ESP32-S3 GPIO  9 (SCL) ←──→ OLED SCL (optional)
 ESP32-S3 3.3V ──────────→ VE.Direct VCC (all 3)
@@ -487,6 +507,9 @@ The OLED cycles through multiple pages showing:
 - Ensure 2.4GHz WiFi is enabled (ESP32 doesn't support 5GHz)
 - Check router allows new devices and DHCP has available leases
 
+**Symptoms:** Device drops off the network for long stretches, then returns rebooted (uptime reset), while RSSI/heap look fine.
+This is the stack-wedge failure mode the [self-healing layers](#wifi--mqtt-self-healing) target, not a signal problem. Confirm via the retained `.../status` topic: a climbing `mqtt_publish_failures` with healthy `wifi_rssi` is the signature. If it recurs, check `wifi_forced_reconnects` and the `mqtt_dead_reboot` events to see which layer is firing.
+
 ### Web Server Not Accessible
 
 **Symptoms:** Cannot reach API endpoints or dashboard
@@ -532,5 +555,5 @@ See the main [repository README](../../README.md) for backend setup details.
 
 ---
 
-**Last Updated:** December 2, 2025
+**Last Updated:** June 18, 2026
 **Status:** ✅ Implemented and operational
