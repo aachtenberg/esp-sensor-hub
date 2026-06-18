@@ -9,9 +9,11 @@
  * - Freenove ESP32-S3-WROOM
  * - GPIO 16 (UART2 RX) <- SmartShunt TX
  * - GPIO 17 (UART1 RX) <- MPPT1 TX
- * - GPIO 18 (SoftwareSerial RX) <- MPPT2 TX
+ * - GPIO 18 (UART0 RX)  <- MPPT2 TX
  * - VE.Direct: 19200 baud, 3.3V TTL
- * Note: GPIO 19/20 avoided — reserved for native USB D-/D+ on ESP32-S3.
+ * Note: all three inputs use hardware UARTs. UART0 is freed for MPPT2 by routing
+ * the debug console to the native USB-Serial/JTAG controller on GPIO 19/20
+ * (ARDUINO_USB_CDC_ON_BOOT=1), replacing the former EspSoftwareSerial on MPPT2.
  *
  * API Endpoints:
  * - GET /           - HTML dashboard
@@ -25,7 +27,6 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
-#include <SoftwareSerial.h>
 #include <WiFiManager.h>
 #include <ESP_DoubleResetDetector.h>
 #include <ArduinoOTA.h>
@@ -60,10 +61,11 @@ const char* DEVICE_NAME_FILE = "/device_name.txt";
 // Configuration
 // ============================================================================
 
-// UART Pin assignments (ESP32-S3 — avoid GPIO 19/20 reserved for native USB)
+// UART Pin assignments (ESP32-S3). GPIO 19/20 are the native USB-Serial/JTAG
+// console (ARDUINO_USB_CDC_ON_BOOT=1), which frees UART0 for MPPT2.
 #define SMARTSHUNT_RX_PIN 16  // GPIO 16 - UART2 RX
 #define MPPT1_RX_PIN 17       // GPIO 17 - UART1 RX
-#define MPPT2_RX_PIN 18       // GPIO 18 - SoftwareSerial RX
+#define MPPT2_RX_PIN 18       // GPIO 18 - UART0 RX (remapped via GPIO matrix)
 
 // VE.Direct baud rate
 #define VEDIRECT_BAUD 19200
@@ -78,12 +80,11 @@ const char* DEVICE_NAME_FILE = "/device_name.txt";
 // Global Objects
 // ============================================================================
 
-// Hardware serial ports for VE.Direct
+// Hardware serial ports for VE.Direct (RX only). UART0 is usable for MPPT2
+// because the console runs on the native USB-Serial/JTAG controller.
 HardwareSerial shuntSerial(2);  // UART2 for SmartShunt
 HardwareSerial mppt1Serial(1);  // UART1 for MPPT1
-
-// SoftwareSerial for MPPT2 (RX only, TX pin -1)
-SoftwareSerial mppt2Serial;
+HardwareSerial mppt2Serial(0);  // UART0 for MPPT2 (freed by USB-CDC console)
 
 // Victron device instances
 VictronSmartShunt smartShunt(&shuntSerial);
@@ -518,8 +519,8 @@ void setup() {
     Serial.println("[UART] Initializing MPPT1 on GPIO 17...");
     mppt1Serial.begin(VEDIRECT_BAUD, SERIAL_8N1, MPPT1_RX_PIN, -1);
 
-    Serial.println("[UART] Initializing MPPT2 on GPIO 18 (SoftwareSerial)...");
-    mppt2Serial.begin(VEDIRECT_BAUD, SWSERIAL_8N1, MPPT2_RX_PIN, -1, false);
+    Serial.println("[UART] Initializing MPPT2 on GPIO 18 (UART0)...");
+    mppt2Serial.begin(VEDIRECT_BAUD, SERIAL_8N1, MPPT2_RX_PIN, -1);
 
     // Initialize device drivers
     smartShunt.begin();
