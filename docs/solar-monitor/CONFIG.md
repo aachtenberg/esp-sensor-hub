@@ -40,10 +40,11 @@ After the first USB flash, subsequent updates can happen over WiFi. The `[env:ot
 
 ```bash
 cd solar-monitor
-OTA_PASSWORD=<your-ota-password> pio run -e ota -t upload
+source ../.env
+pio run -e ota -t upload --upload-port "$SOLAR_MONITOR_IP"
 ```
 
-`upload_port` defaults to `192.168.0.85` in `platformio.ini` — override with `--upload-port <ip-or-hostname>` if the device moves. `upload_flags` also pins `--host_port=8266` so the espota reverse connection isn't blocked by Windows Firewall under WSL2 mirrored networking.
+The device IP is not pinned in `platformio.ini` (matches the sibling firmwares) — it comes from `SOLAR_MONITOR_IP` in the gitignored `.env`, passed via `--upload-port`. `OTA_PASSWORD` is likewise read from `.env` (consumed by `--auth=${sysenv.OTA_PASSWORD}`). `upload_flags` keeps `--host_port=8266` — a host-environment WSL2 firewall setting (not a device address) — so the espota reverse connection isn't blocked by Windows Firewall under mirrored networking.
 
 ## Hardware Connections
 

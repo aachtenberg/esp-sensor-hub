@@ -26,9 +26,10 @@ PlatformIO firmware for ESP32-S3 solar monitoring using the Victron VE.Direct pr
    ```
    > The runtime serial console is on the **native USB-Serial/JTAG port** (enumerates as `/dev/ttyACM*`), not the CH343 UART port. Flashing over CH343 still works because the ROM bootloader always uses UART0.
 4. **Configure WiFi**: double-reset within 3 s → connect to the `SolarMonitor-Setup` AP → open `http://192.168.4.1` → enter WiFi + device name
-5. Subsequent updates go over the air:
+5. Subsequent updates go over the air (device IP comes from `.env`, not pinned in-repo):
    ```bash
-   OTA_PASSWORD=<your-pw> pio run -e ota -t upload
+   source ../.env
+   pio run -e ota -t upload --upload-port "$SOLAR_MONITOR_IP"
    ```
 
 ## Reliability / Self-Healing

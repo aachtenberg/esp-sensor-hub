@@ -292,14 +292,15 @@ Full payload schemas and example documents live in [CONFIG.md](CONFIG.md#mqtt-to
 `platformio.ini` exposes two environments:
 
 - `env:esp32-s3-devkitc-1` — USB flash via the CH343 UART port (first flash only). The runtime serial monitor is on the **native USB-Serial/JTAG port** (`/dev/ttyACM*`), since the console moved there to free UART0 for MPPT2.
-- `env:ota` — ArduinoOTA over WiFi, inherits everything else, password via env var. `upload_port` is pinned to `192.168.0.85`; `upload_flags` pins `--host_port=8266` so the espota reverse connection survives WSL2 mirrored-network firewalling.
+- `env:ota` — ArduinoOTA over WiFi, inherits everything else, password via the `OTA_PASSWORD` env var. The device IP is **not** pinned in-repo (matches the sibling firmwares) — pass it at upload time as `--upload-port "$SOLAR_MONITOR_IP"` from `.env`. `upload_flags` keeps `--host_port=8266` (a host-environment WSL2 firewall setting, not a device address) so the espota reverse connection survives WSL2 mirrored-network firewalling.
 
 ```bash
 # First time (USB)
 pio run -e esp32-s3-devkitc-1 -t upload
 
-# Subsequent updates (OTA)
-OTA_PASSWORD=<your-pw> pio run -e ota -t upload
+# Subsequent updates (OTA) — IP from .env, not pinned in-repo
+source ../../.env
+pio run -e ota -t upload --upload-port "$SOLAR_MONITOR_IP"
 ```
 
 The OTA password is never stored in `platformio.ini` — `upload_flags` reads it from the `OTA_PASSWORD` shell variable. The same password must be set in `secrets.h` (consumed by the firmware side).
