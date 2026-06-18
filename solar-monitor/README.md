@@ -33,11 +33,12 @@ PlatformIO firmware for ESP32-S3 solar monitoring using the Victron VE.Direct pr
 
 ## Reliability / Self-Healing
 
-The firmware layers three recovery mechanisms to survive the WiFi/TCP-stack wedges that previously required a manual power-cycle (see [docs/solar-monitor/README.md](../docs/solar-monitor/README.md#wifi--mqtt-self-healing)):
+The firmware layers four recovery mechanisms (cheapest first) to survive the WiFi/TCP-stack wedges that previously required a manual power-cycle (see [docs/solar-monitor/README.md](../docs/solar-monitor/README.md#wifi--mqtt-self-healing)):
 
-1. **Forced WiFi re-association** after 5 consecutive MQTT failures (rate-limited) — recovers "associated but no backhaul" stalls that `setAutoReconnect` misses.
-2. **MQTT-dead reboot** — if no successful publish lands for 15 min (after at least one this boot), reboot to clear a wedged stack.
-3. **Task watchdog** (30 s) — reboots on a hard `loop()` deadlock; unsubscribed during OTA.
+1. **Stale-connection re-MQTT** — if connected but no successful publish in 120 s, drop and re-establish the MQTT session.
+2. **Forced WiFi re-association** after 5 consecutive MQTT failures (rate-limited) — recovers "associated but no backhaul" stalls that `setAutoReconnect` misses.
+3. **MQTT-dead reboot** — if no successful publish lands for 15 min (after at least one this boot), reboot to clear a wedged stack.
+4. **Task watchdog** (30 s) — reboots on a hard `loop()` deadlock; unsubscribed during OTA.
 
 The root cause was also addressed: MPPT2 moved off bit-banged EspSoftwareSerial onto hardware UART0, removing a GPIO-ISR WiFi antagonist.
 

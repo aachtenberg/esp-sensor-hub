@@ -186,7 +186,7 @@ int consecutiveMqttFailures = 0;                  // Reset on any MQTT success
 unsigned long lastForcedWifiReconnect = 0;        // Timestamp of last forced re-association
 unsigned long wifiReconnectTimestamps[WIFI_MAX_RECONNECTS_PER_HOUR] = {0};  // Rolling window
 int wifiReconnectIndex = 0;                       // Circular buffer index
-unsigned int totalForcedWifiReconnects = 0;       // Lifetime count (diagnostics)
+unsigned int totalForcedWifiReconnects = 0;       // Count since boot (RAM-only; resets on reboot/self-heal)
 
 // ============================================================================
 // Device Name Management
@@ -446,6 +446,13 @@ void forceWifiReconnect(const String& reason) {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.reconnect();
+
+    // Clear the MQTT reconnect backoff so the broker connect is retried promptly
+    // on the fresh association. Otherwise an exponential backoff accrued from the
+    // prior failures (up to MQTT_RECONNECT_MAX_INTERVAL_MS) would delay recovery
+    // even when the new link is immediately healthy — defeating the re-association.
+    mqttReconnectBackoff = MQTT_RECONNECT_INTERVAL_MS;
+    lastMqttReconnectAttempt = 0;
 }
 
 // ============================================================================
