@@ -36,25 +36,29 @@ cd scripts
 ./mqtt_device_control.sh -b 192.168.1.100 deepsleep 30
 ```
 
+**Requirements:** `mosquitto_pub`/`mosquitto_sub` (`sudo apt install mosquitto-clients`). `jq` is optional and used to pretty-print JSON.
+
 **Features:**
-- Automatic retry with configurable intervals (catches device wake windows)
-- Visual confirmation of command success
-- Colored output for easy reading
-- Support for all MQTT commands
+- Subscribes before publishing, so fast device replies are never missed
+- Resends on an interval until the device confirms (catches deep-sleep wake windows)
+- Confirms success by matching the firmware's exact event (e.g. `deep_sleep_config`), and fails fast on `command_error`
+- `status` only accepts a fresh status; if the device doesn't answer it shows the broker's cached status, labelled as stale
 - Environment variable configuration (`MQTT_BROKER`, `DEVICE_NAME`)
 - Multi-topic monitoring
 
 **Available Commands:**
 - `deepsleep <seconds>` - Configure deep sleep (0-3600 seconds, 0=disable)
-- `disable-sleep` - Disable deep sleep (shortcut)
+- `disable-sleep` - Disable deep sleep (shortcut, retries until confirmed)
 - `enable-sleep <seconds>` - Enable deep sleep (shortcut)
-- `status` - Request device status update
+- `interval <seconds>` - Set sensor reading interval (5-3600 seconds)
+- `status` - Request a fresh device status update
 - `restart` - Restart the device
+- `config` - Start the WiFi configuration portal (temperature-sensor)
 - `monitor` - Monitor all device topics in real-time
 
 **Options:**
 - `-b, --broker <ip>` - MQTT broker IP
-- `-d, --device <name>` - Device name
+- `-d, --device <name>` - Device name (spaces become dashes, matching the firmware topics)
 - `-r, --retry <count>` - Maximum retry attempts (default: 15)
 - `-i, --interval <sec>` - Retry interval (default: 2)
 
