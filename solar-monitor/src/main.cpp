@@ -105,7 +105,7 @@ unsigned long bootTime = 0;
 
 void loadDeviceName();
 void saveDeviceName(const char* name);
-void publishEvent(const String& eventType, const String& message, const String& severity = "info");
+bool publishEvent(const String& eventType, const String& message, const String& severity = "info");
 void setupWiFi();
 void setupOTA();
 void setupWebServer();
@@ -167,6 +167,18 @@ void setupTaskWatchdog();
 #define WIFI_MAX_RECONNECTS_PER_HOUR             6         // Emergency brake to prevent thrashing
 #define WIFI_RECONNECT_HISTORY_WINDOW_MS         3600000UL // 1 hour rolling window
 
+// Boot-time WiFi. WiFiManager's config portal has no timeout by default and
+// only exits when settings are saved, and the task watchdog isn't armed until
+// setup() finishes. So a boot that couldn't reach the AP (right after a
+// self-heal reboot, or after a power cut when the router comes back slower than
+// we do) used to sit in the portal until someone power-cycled the device. Now a
+// boot with saved credentials never opens the portal: it carries on offline and
+// loop() keeps retrying. The double-reset / first-setup portal closes after
+// WIFI_CONFIG_PORTAL_TIMEOUT_SEC without activity.
+#define WIFI_BOOT_CONNECT_TIMEOUT_SEC            30
+#define WIFI_CONFIG_PORTAL_TIMEOUT_SEC           300
+#define WIFI_DOWN_RETRY_INTERVAL_MS              60000UL   // While WiFi is down, re-issue a connect this often
+
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
@@ -187,6 +199,16 @@ unsigned long lastForcedWifiReconnect = 0;        // Timestamp of last forced re
 unsigned long wifiReconnectTimestamps[WIFI_MAX_RECONNECTS_PER_HOUR] = {0};  // Rolling window
 int wifiReconnectIndex = 0;                       // Circular buffer index
 unsigned int totalForcedWifiReconnects = 0;       // Count since boot (RAM-only; resets on reboot/self-heal)
+
+bool otaReady = false;          // ArduinoOTA started (deferred if the boot came up offline)
+bool bootEventPending = false;  // device_boot couldn't be published at boot; send once MQTT is up
+String bootMessage;
+
+// Survives ESP.restart() but not power loss, so the next boot can say the
+// MQTT-dead self-heal caused it ("Software Reset" alone looks the same as the
+// MQTT restart command).
+#define SELF_HEAL_REBOOT_MAGIC 0x5E1FBEEFUL
+RTC_NOINIT_ATTR uint32_t selfHealRebootMarker;
 
 // ============================================================================
 // Device Name Management
@@ -348,7 +370,7 @@ bool publishJson(const String& topic, JsonDocument& doc, bool retain) {
     return ok;
 }
 
-void publishEvent(const String& eventType, const String& message, const String& severity) {
+bool publishEvent(const String& eventType, const String& message, const String& severity) {
     StaticJsonDocument<384> doc;
     doc["device"] = deviceName;
     doc["chip_id"] = chipId;
@@ -364,6 +386,7 @@ void publishEvent(const String& eventType, const String& message, const String& 
     if (ok) {
         Serial.println("[Event] " + eventType + " - " + message);
     }
+    return ok;
 }
 
 // ============================================================================
@@ -403,14 +426,28 @@ bool isWifiReconnectRateLimited() {
 // TASK_WDT_TIMEOUT_SEC the chip reboots with reset reason "Task Watchdog".
 void setupTaskWatchdog() {
 #if ESP_IDF_VERSION_MAJOR >= 5
-    // Arduino-ESP32 3.x / IDF 5.x: struct-based init. idle_core_mask = 0 leaves
-    // the idle tasks alone; we only watch our own loop task.
+    // Arduino-ESP32 3.x / IDF 5.x: struct-based config. Keep watching whichever
+    // idle tasks the core's sdkconfig watches.
+    uint32_t idleCoreMask = 0;
+#ifdef CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+    idleCoreMask |= 1 << 0;
+#endif
+#ifdef CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+    idleCoreMask |= 1 << 1;
+#endif
     esp_task_wdt_config_t wdtConfig = {
         .timeout_ms = TASK_WDT_TIMEOUT_SEC * 1000,
-        .idle_core_mask = 0,
+        .idle_core_mask = idleCoreMask,
         .trigger_panic = true,
     };
-    esp_task_wdt_init(&wdtConfig);  // harmless if already initialized
+    // Arduino-ESP32 3.x already starts the TWDT at boot (5 s, panic) and IDF 5
+    // refuses a second init. Before this was handled, the init call failed
+    // silently and the loop task joined the core's 5 s watchdog, so one blocking
+    // network call on bad WiFi (a publish to a stalled socket retries for up to
+    // 10 s; an MQTT connect can take ~8 s) rebooted the chip. Reconfigure instead.
+    if (esp_task_wdt_init(&wdtConfig) == ESP_ERR_INVALID_STATE) {
+        esp_task_wdt_reconfigure(&wdtConfig);
+    }
 #else
     // Arduino-ESP32 2.x / IDF 4.x: (timeout_seconds, panic-on-timeout)
     esp_task_wdt_init(TASK_WDT_TIMEOUT_SEC, true);
@@ -565,10 +602,15 @@ void setup() {
             case ESP_RST_SDIO: resetReason = "SDIO"; break;
             default: resetReason = "Unknown"; break;
         }
+        if (reason == ESP_RST_SW && selfHealRebootMarker == SELF_HEAL_REBOOT_MAGIC) {
+            resetReason += " (MQTT-dead self-heal)";
+        }
     #endif
-    String bootMsg = "Device started - Reset reason: " + resetReason +
-                     ", Free heap: " + String(ESP.getFreeHeap()) + " bytes";
-    publishEvent("device_boot", bootMsg, "info");
+    selfHealRebootMarker = 0;
+    bootMessage = "Device started - Reset reason: " + resetReason +
+                  ", Free heap: " + String(ESP.getFreeHeap()) + " bytes";
+    // If this boot came up offline, loop() sends it once MQTT connects
+    bootEventPending = !publishEvent("device_boot", bootMessage, "info");
 
     // Arm the task watchdog now that setup (incl. any blocking WiFi config
     // portal) is done — from here loop() must keep iterating or the chip reboots.
@@ -599,11 +641,13 @@ void loop() {
     // Check WiFi connection and log reconnects
     static int reconnectCount = 0;
     static bool wasConnected = false;
+    static unsigned long lastWifiRetry = 0;
     bool isConnected = (WiFi.status() == WL_CONNECTED);
-    
+
     if (!isConnected && wasConnected) {
         // WiFi disconnected
         reconnectCount++;
+        lastWifiRetry = millis();
         // While WiFi is actually down, MQTT failures aren't a backhaul signal —
         // clear the counter so we don't force a re-assoc the instant WiFi returns.
         consecutiveMqttFailures = 0;
@@ -613,9 +657,22 @@ void loop() {
             publishEvent("wifi_reconnect", msg, "warning");
         }
     } else if (isConnected && !wasConnected) {
-        // WiFi reconnected
+        // WiFi (re)connected. Also covers the first connect after an offline
+        // boot, which skipped OTA setup.
         reconnectCount = 0;
-    } else if (isConnected) {
+        if (!otaReady) {
+            setupOTA();
+        }
+    } else if (!isConnected) {
+        // Still down. The core's auto-reconnect normally keeps retrying, but if
+        // it has stopped (or this boot never connected), start a fresh attempt.
+        if (millis() - lastWifiRetry >= WIFI_DOWN_RETRY_INTERVAL_MS) {
+            lastWifiRetry = millis();
+            Serial.println("[WiFi] Still disconnected - retrying connection");
+            WiFi.disconnect();
+            WiFi.begin();
+        }
+    } else {
         // WiFi reports connected and steady. If MQTT keeps failing anyway, the
         // association has likely gone stale (AP/mesh node lost backhaul) — force
         // a re-association so the radio can land on a healthy BSSID.
@@ -639,6 +696,7 @@ void loop() {
                      "No successful publish in " + String(MQTT_DEAD_REBOOT_TIMEOUT_MS / 60000UL) +
                      " min — rebooting to self-heal", "error");
         delay(200);  // best-effort flush (will usually fail, since MQTT is dead)
+        selfHealRebootMarker = SELF_HEAL_REBOOT_MAGIC;  // reported in the next device_boot
         ESP.restart();
     }
 
@@ -686,6 +744,12 @@ void loop() {
     // Service MQTT (reconnect if needed, process incoming packets)
     ensureMqttConnected();
     mqttClient.loop();
+
+    // A boot that came up offline couldn't publish device_boot; send it now so
+    // the reset reason (e.g. a self-heal reboot) isn't lost.
+    if (bootEventPending && mqttClient.connected()) {
+        bootEventPending = !publishEvent("device_boot", bootMessage + " (sent after WiFi recovered)", "info");
+    }
 
     // Periodic status output
     if (millis() - lastStatusPrint >= STATUS_INTERVAL) {
@@ -766,9 +830,11 @@ void setupWiFi() {
         shouldSaveConfig = true;
     });
 
-    // Don't use timeout - we want to keep retrying forever in weak WiFi zones
-    // User must double-reset to enter config mode
-    wm.setConnectTimeout(0);
+    // Give a slow AP time to associate at boot. If it still fails, setup()
+    // carries on offline and loop() keeps retrying (see WIFI_DOWN_RETRY_INTERVAL_MS).
+    wm.setConnectTimeout(WIFI_BOOT_CONNECT_TIMEOUT_SEC);
+    // Never let a portal block setup() forever (the task watchdog isn't armed yet)
+    wm.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
 
     WiFi.mode(WIFI_STA);
     // Disable WiFi modem sleep — overnight low-traffic conditions otherwise
@@ -790,9 +856,11 @@ void setupWiFi() {
         Serial.println("[WiFi] Then open http://192.168.4.1 in browser");
         Serial.println();
 
-        // Start config portal (blocking - waits until configured)
+        // Start config portal (blocking until configured or timed out). On a
+        // timeout the restart boots normally, since the double-reset flag is
+        // already cleared.
         if (!wm.startConfigPortal(apName)) {
-            Serial.println("[WiFi] Failed to connect after config portal");
+            Serial.println("[WiFi] Config portal timed out or failed to connect");
             Serial.println("[WiFi] Restarting...");
             delay(3000);
             ESP.restart();
@@ -822,11 +890,20 @@ void setupWiFi() {
         Serial.println("[WiFi] (Double-reset within 3 seconds to enter config mode)");
         Serial.println();
 
-        // Try to auto-connect with saved credentials
-        // If no saved credentials, will start config portal
+        // Try to auto-connect with saved credentials. Only a device with no saved
+        // credentials opens the config portal here. With credentials, a failed
+        // connect must NOT open it: that blocked setup() forever and was why the
+        // device needed a power-cycle after a self-heal reboot or a power cut.
+        bool haveCredentials = wm.getWiFiIsSaved();
+        wm.setEnableConfigPortal(!haveCredentials);
         if (!wm.autoConnect(apName)) {
-            Serial.println("[WiFi] Failed to connect");
-            Serial.println("[WiFi] Running in offline mode - double-reset to configure");
+            if (haveCredentials) {
+                Serial.println("[WiFi] Not connected yet - continuing offline, retrying in loop()");
+            } else {
+                Serial.println("[WiFi] Config portal timed out with no saved credentials - restarting");
+                delay(1000);
+                ESP.restart();
+            }
         }
         
         // Save device name and log configuration event if config was saved
@@ -920,6 +997,7 @@ void setupOTA() {
     });
 
     ArduinoOTA.begin();
+    otaReady = true;
     Serial.printf("[OTA] Ready — hostname: %s\n", deviceName);
 }
 

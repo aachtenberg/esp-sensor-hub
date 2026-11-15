@@ -155,6 +155,7 @@ Event types emitted: `device_boot`, `device_configured`, `wifi_connected`, `wifi
 2. Connect, open http://192.168.4.1
 3. Enter WiFi credentials and (optionally) update device name
 4. On save, device reboots and auto-connects; MQTT topic base follows the new name
+5. The portal closes after 5 minutes without activity (`WIFI_CONFIG_PORTAL_TIMEOUT_SEC`) and the device restarts normally. A normal boot that can't reach WiFi does not open the portal. It runs offline and keeps retrying.
 
 ### Display
 OLED cycles through Battery, Solar, Daily Stats, and System pages (5 s each).
@@ -187,7 +188,7 @@ mosquitto_sub -h 192.168.0.167 -t 'esp-sensor-hub/+/status' -v -W 2
 - Check serial log: `[MQTT] Connecting to <broker>:1883 ...` → `[MQTT] Connected`
 - If `Connect failed, state=N`, decode state: `-4` timeout, `-3` connection lost, `-2` connect failed, `5` bad credentials
 - `mqtt_publish_failures` and `wifi_forced_reconnects` in the `status` payload are good health metrics
-- Layered self-healing (see [README → WiFi / MQTT Self-Healing](README.md#wifi--mqtt-self-healing)): stale-connection re-MQTT at 120 s → forced WiFi re-association after 5 consecutive failures → full reboot after 15 min with no successful publish → task-watchdog reboot on a `loop()` deadlock
+- Layered self-healing (see [README → WiFi / MQTT Self-Healing](README.md#wifi--mqtt-self-healing)): stale-connection re-MQTT at 120 s → forced WiFi re-association after 5 consecutive failures → full reboot after 15 min with no successful publish → task-watchdog reboot on a `loop()` deadlock. A boot that can't reach WiFi continues offline and retries every 60 s instead of waiting in the config portal.
 
 ### OTA Failures
 - `ota_error` event payload includes `Auth Failed`, `Begin Failed`, etc.
