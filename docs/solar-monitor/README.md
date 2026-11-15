@@ -322,6 +322,15 @@ This device sits on weak/mesh WiFi and historically wedged with `WiFi.status() =
 
 Guard rails on the forced re-association prevent radio thrashing: a 5-minute cooldown (`WIFI_FORCED_RECONNECT_COOLDOWN_MS`) and a max of 6 per rolling hour (`WIFI_MAX_RECONNECTS_PER_HOUR`). Diagnostics surface in the retained `.../status` payload (`mqtt_publish_failures`, `wifi_forced_reconnects`) and as `wifi_forced_reconnect` / `mqtt_dead_reboot` entries on `.../events`.
 
+**Booting without WiFi (the "only a power-cycle fixes it" trap):** a reboot is only a recovery if the next boot can get back online. Previously, a boot that couldn't reach the AP fell into WiFiManager's config portal. That happened right after an MQTT-dead reboot (when WiFi was still bad), after a power cut when the router came back slower than the ESP32, or after a reset during setup (seen as a double reset). The portal had no timeout, and the task watchdog isn't armed until `setup()` finishes, so the device sat in the portal until someone unplugged it. Now:
+
+- A boot with saved credentials never opens the portal. It waits up to `WIFI_BOOT_CONNECT_TIMEOUT_SEC` (30 s), then carries on offline.
+- While WiFi is down, `loop()` starts a fresh connect every `WIFI_DOWN_RETRY_INTERVAL_MS` (60 s), on top of the core's own auto-reconnect.
+- OTA is started on the first successful connect if the boot came up offline.
+- Any portal (double-reset or first setup) closes after `WIFI_CONFIG_PORTAL_TIMEOUT_SEC` (5 min) without activity, then the device restarts.
+- If `device_boot` couldn't be published at boot, it is sent once MQTT connects. A reboot caused by the MQTT-dead self-heal reports `Reset reason: Software Reset (MQTT-dead self-heal)`.
+- On Arduino-ESP32 3.x the 30 s task-watchdog setting is now actually applied. The core starts its own 5 s watchdog at boot and IDF 5 rejects a second init, so before this fix the loop task ran on the 5 s watchdog. One slow network call on bad WiFi (up to 10 s for a publish to a stalled socket) rebooted the chip, which then hit the portal trap above.
+
 **Root cause, not just recovery:** MPPT2 was moved off bit-banged EspSoftwareSerial onto hardware UART0. The software-serial RX ran in a GPIO interrupt at 19200 baud that contended with the WiFi stack — the prime suspect for the original wedges. All three VE.Direct inputs now use hardware UARTs.
 
 ---
@@ -509,6 +518,9 @@ The OLED cycles through multiple pages showing:
 
 **Symptoms:** Device drops off the network for long stretches, then returns rebooted (uptime reset), while RSSI/heap look fine.
 This is the stack-wedge failure mode the [self-healing layers](#wifi--mqtt-self-healing) target, not a signal problem. Confirm via the retained `.../status` topic: a climbing `mqtt_publish_failures` with healthy `wifi_rssi` is the signature. If it recurs, check `wifi_forced_reconnects` and the `mqtt_dead_reboot` events to see which layer is firing.
+
+**Symptoms:** Device stays dark until it is unplugged and plugged back in.
+On firmware before the boot-time fix, this was the device stuck in the WiFiManager portal after a boot without WiFi (see [Booting without WiFi](#wifi--mqtt-self-healing)). While it's dark, look for a `SolarMonitor-Setup` WiFi network. If it's visible, that's the portal. On current firmware the portal closes after 5 minutes and normal boots skip it, so this should not recur. If it does, the device is wedged some other way, and the `device_boot` reset reason after the replug is the next clue.
 
 ### Web Server Not Accessible
 
